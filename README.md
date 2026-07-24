@@ -1,4 +1,4 @@
-﻿# BrandBlaze
+# BrandBlaze
 
 **One product photograph in. An identity-consistent campaign library out.**
 
@@ -29,7 +29,10 @@ BrandBlaze treats the product as an invariant and the campaign world as a variab
 7. Stores each generated image and its provenance manifest in B2.
 8. Verifies the Genblaze manifest before accepting the output.
 9. Uses Claude vision again to compare the generated product with the source.
-10. Displays the identity score, QA notes, provider, market, channel, environment, and B2-backed image.
+10. Automatically retries a low-scoring result once with Claude's QA correction.
+11. Flags a second low-scoring attempt instead of presenting it as verified.
+12. Preserves every attempt, prompt, hash, manifest, score, and outcome in B2 lineage.
+13. Displays the identity score, QA notes, provider, market, channel, environment, and B2-backed image.
 
 The UI currently supports preset and custom:
 
@@ -132,6 +135,22 @@ Genblaze stores generated assets through its B2-compatible S3 sink. A variant is
 
 Claude receives the original and generated images and scores only product identity preservation. Background, props, lighting, and camera angle are intentionally ignored. The resulting score and concise QA note are shown in the interface.
 
+The score is an enforcement gate, not decoration. By default, results below
+`IDENTITY_QA_THRESHOLD=85` are rejected and regenerated once with the first
+attempt's QA note injected as a corrective constraint. If the final attempt is
+still below threshold—or QA cannot produce a readable score—the variant is
+preserved but marked `flagged`, never `ready`.
+
+## Campaign operations
+
+- The campaign board groups generated assets by market.
+- The identity inspector shows source and output side by side.
+- Attempt history exposes accepted and rejected generations.
+- The B2 archive reloads completed run indexes after local state is gone.
+- JSON and CSV exports provide durable asset URLs, hashes, scores, and metadata.
+- Presigned browser URLs are refreshed when archived runs are opened.
+- The pre-run budget shows baseline and worst-case Claude/GMI call counts.
+
 ## Run lifecycle
 
 ```text
@@ -140,6 +159,8 @@ queued -> running -> complete
 
 variant:
 queued -> generating -> ready
+                    \-> reviewing -> retry -> ready
+                                           \-> flagged
                     \-> failed
 ```
 
@@ -181,6 +202,8 @@ Then configure:
 | `GENBLAZE_CONCURRENCY` | No | Simultaneous image jobs |
 | `GENBLAZE_TIMEOUT` | No | Per-pipeline timeout in seconds |
 | `MAX_VARIANTS_PER_RUN` | No | Server-side cost guardrail |
+| `IDENTITY_QA_THRESHOLD` | No | Minimum score required for verified status |
+| `IDENTITY_MAX_ATTEMPTS` | No | Maximum generation attempts per variant |
 | `ALLOWED_ORIGINS` | Yes | Frontend origins allowed by CORS |
 | `NEXT_PUBLIC_API_URL` | Yes | Browser-visible FastAPI URL |
 
@@ -284,6 +307,19 @@ GET /api/runs/{run_id}
 ```
 
 The frontend polls this endpoint while generation is active.
+
+### List local and B2-backed runs
+
+```http
+GET /api/runs?include_b2=true&limit=40
+```
+
+### Export campaign metadata
+
+```http
+GET /api/runs/{run_id}/export?format=json
+GET /api/runs/{run_id}/export?format=csv
+```
 
 ## Verification and tests
 
@@ -400,4 +436,3 @@ the private reporting process in [SECURITY.md](SECURITY.md).
 ## License
 
 BrandBlaze is available under the [MIT License](LICENSE).
-
