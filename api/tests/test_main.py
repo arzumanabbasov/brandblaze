@@ -70,7 +70,7 @@ class ApiTests(unittest.TestCase):
         ):
             response = TestClient(main.app).post(
                 "/api/runs",
-                files={"file": ("product.png", b"real-image-bytes", "image/png")},
+                files={"file": ("product.png", b"\x89PNG\r\n\x1a\nreal-image-bytes", "image/png")},
                 data={
                     "product_name": "Porcelain tea set",
                     "brief": "Preserve all three pieces and floral pattern.",
@@ -84,7 +84,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         run = response.json()
         self.assertEqual(len(run["variants"]), 4)
-        self.assertEqual(run["source_sha256"], hashlib.sha256(b"real-image-bytes").hexdigest())
+        self.assertEqual(run["source_sha256"], hashlib.sha256(b"\x89PNG\r\n\x1a\nreal-image-bytes").hexdigest())
         self.assertTrue(run["source_key"].endswith("/original.png"))
         self.assertEqual(fake_b2.objects[0]["ContentType"], "image/png")
         self.assertTrue((self.runtime / f"{run['run_id']}.json").exists())
@@ -97,7 +97,7 @@ class ApiTests(unittest.TestCase):
         ):
             response = TestClient(main.app).post(
                 "/api/runs",
-                files={"file": ("product.png", b"image", "image/png")},
+                files={"file": ("product.png", b"\x89PNG\r\n\x1a\nimage", "image/png")},
                 data={
                     "product_name": "Tea set",
                     "brief": "Preserve the pattern.",
@@ -143,7 +143,7 @@ class ApiTests(unittest.TestCase):
             patch.object(main, "presign_output_url", return_value="https://signed.test/output.png"),
             patch.object(main, "evaluate_variant_with_claude", return_value=(96, "Identity preserved.")),
         ):
-            manifest_url = main.execute_variant(
+            manifest_urls = main.execute_variant(
                 run_id,
                 "https://signed.test/source.png",
                 "Tea set",
@@ -155,11 +155,81 @@ class ApiTests(unittest.TestCase):
             )
 
         saved = main.RUNS[run_id]["variants"][0]
-        self.assertEqual(manifest_url, "b2://asset-bucket/manifest.json")
+        self.assertEqual(manifest_urls, ["b2://asset-bucket/manifest.json"])
         self.assertEqual(saved["status"], "ready")
         self.assertEqual(saved["score"], 96)
         self.assertEqual(saved["durable_url"], asset.url)
         self.assertEqual(saved["url"], "https://signed.test/output.png")
+        self.assertEqual(saved["attempts"][0]["outcome"], "accepted")
+
+    def test_low_identity_score_retries_then_flags(self):
+        run_id = "retry-run"
+        variant = main.Variant("v1", "Studio / Editorial", "France", "Editorial", "Studio")
+        main.RUNS[run_id] = {"run_id": run_id, "status": "running", "variants": [main.asdict(variant)]}
+        calls = {"pipeline": 0}
+
+        class FakePipeline:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def step(self, *args, **kwargs):
+                return self
+
+            def run(self, **kwargs):
+                calls["pipeline"] += 1
+                asset = SimpleNamespace(
+                    url=f"https://s3.us-west-004.backblazeb2.com/asset-bucket/output-{calls['pipeline']}.png",
+                    sha256=f"sha-{calls['pipeline']}",
+                )
+                return SimpleNamespace(
+                    run=SimpleNamespace(steps=[SimpleNamespace(assets=[asset])]),
+                    manifest=SimpleNamespace(
+                        verify=lambda: True,
+                        manifest_uri=f"b2://asset-bucket/manifest-{calls['pipeline']}.json",
+                    ),
+                )
+
+        with (
+            patch.dict(os.environ, {"IDENTITY_QA_THRESHOLD": "85", "IDENTITY_MAX_ATTEMPTS": "2"}),
+            patch.object(main, "provider_for", return_value=(object(), "seedream-5.0-lite", "GMI Cloud / Seedream 5")),
+            patch.object(main, "direct_variant_with_claude", return_value="base prompt"),
+            patch.object(main, "Pipeline", FakePipeline),
+            patch.object(main, "storage_sink", return_value=object()),
+            patch.object(main, "presign_output_url", side_effect=lambda url: f"{url}?signed=1"),
+            patch.object(main, "evaluate_variant_with_claude", side_effect=[(40, "Handle changed."), (70, "Pattern drift.")]),
+        ):
+            manifests = main.execute_variant(
+                run_id, "https://source", "Tea set", "identity", "Quiet luxury",
+                "image/png", "source-sha", variant,
+            )
+
+        saved = main.RUNS[run_id]["variants"][0]
+        self.assertEqual(calls["pipeline"], 2)
+        self.assertEqual(saved["status"], "flagged")
+        self.assertEqual(len(saved["attempts"]), 2)
+        self.assertEqual(saved["attempts"][0]["outcome"], "rejected")
+        self.assertIn("Handle changed", saved["attempts"][1]["prompt"])
+        self.assertEqual(len(manifests), 2)
+
+    def test_malformed_qa_json_preserves_asset_for_review(self):
+        score, notes = main.parse_qa_response("not json")
+        self.assertIsNone(score)
+        self.assertIn("preserved", notes)
+
+    def test_upload_rejects_mismatched_file_signature(self):
+        response = TestClient(main.app).post(
+            "/api/runs",
+            files={"file": ("fake.png", b"not-a-png", "image/png")},
+            data={
+                "product_name": "Tea set",
+                "brief": "Preserve it.",
+                "markets": '["Japan"]',
+                "channels": '["Editorial"]',
+                "environments": '["Studio"]',
+                "aesthetic": "Quiet luxury",
+            },
+        )
+        self.assertEqual(response.status_code, 415)
 
     def test_interrupted_persisted_run_is_marked_failed(self):
         path = self.runtime / "interrupted.json"
@@ -176,6 +246,44 @@ class ApiTests(unittest.TestCase):
         loaded = main.load_runs()
         self.assertEqual(loaded["interrupted"]["status"], "failed")
         self.assertEqual(loaded["interrupted"]["variants"][0]["status"], "failed")
+
+    def test_campaign_export_contains_durable_lineage(self):
+        main.RUNS["export-run"] = {
+            "run_id": "export-run",
+            "product_name": "Tea set",
+            "status": "complete",
+            "variants": [{
+                "id": "v1",
+                "market": "Japan",
+                "channel": "Editorial",
+                "environment": "Studio",
+                "status": "ready",
+                "score": 92,
+                "qa_notes": "Identity preserved.",
+                "sha256": "asset-sha",
+                "durable_url": "https://b2.example/bucket/asset.png",
+                "provider": "GMI Cloud / Seedream 5",
+            }],
+        }
+        response = TestClient(main.app).get("/api/runs/export-run/export?format=csv")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("asset-sha", response.text)
+        self.assertIn("https://b2.example/bucket/asset.png", response.text)
+        self.assertIn("attachment", response.headers["content-disposition"])
+
+    def test_local_run_archive_summarizes_flagged_and_ready(self):
+        main.RUNS["summary-run"] = {
+            "run_id": "summary-run",
+            "product_name": "Tea set",
+            "status": "complete",
+            "created_at": "2026-07-24T00:00:00+00:00",
+            "variants": [{"status": "ready"}, {"status": "flagged"}],
+        }
+        response = TestClient(main.app).get("/api/runs")
+        self.assertEqual(response.status_code, 200)
+        summary = response.json()[0]
+        self.assertEqual(summary["ready_count"], 1)
+        self.assertEqual(summary["flagged_count"], 1)
 
 
 if __name__ == "__main__":

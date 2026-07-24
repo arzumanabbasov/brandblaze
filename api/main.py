@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import csv
+import io
 import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -14,15 +17,16 @@ from urllib.parse import unquote, urlparse
 import boto3
 from anthropic import Anthropic
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from genblaze_core import Asset, KeyStrategy, Modality, ObjectStorageSink, Pipeline
 from genblaze_s3 import S3StorageBackend
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-app = FastAPI(title="BrandBlaze Genblaze API", version="0.1.0")
+app = FastAPI(title="BrandBlaze Genblaze API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173").split(","),
@@ -46,6 +50,7 @@ class Variant:
     score: int | None = None
     qa_notes: str | None = None
     sha256: str | None = None
+    attempts: list[dict[str, Any]] | None = None
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / ".runtime" / "runs"
@@ -85,6 +90,35 @@ def required(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def detected_media_type(payload: bytes) -> str | None:
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def run_summary(run: dict[str, Any]) -> dict[str, Any]:
+    variants = run.get("variants", [])
+    return {
+        "run_id": run.get("run_id"),
+        "product_name": run.get("product_name"),
+        "status": run.get("status"),
+        "aesthetic": run.get("aesthetic"),
+        "created_at": run.get("created_at"),
+        "completed_at": run.get("completed_at"),
+        "variant_count": len(variants),
+        "ready_count": sum(item.get("status") == "ready" for item in variants),
+        "flagged_count": sum(item.get("status") == "flagged" for item in variants),
+    }
 
 
 def b2_client():
@@ -139,6 +173,50 @@ def presign_output_url(durable_url: str) -> str:
     )
 
 
+def present_run(run: dict[str, Any]) -> dict[str, Any]:
+    presented = json.loads(json.dumps(run))
+    try:
+        if presented.get("source_key"):
+            presented["source_url"] = source_b2_url(b2_client(), presented["source_key"])
+        for variant in presented.get("variants", []):
+            if variant.get("durable_url"):
+                variant["url"] = presign_output_url(variant["durable_url"])
+            for attempt in variant.get("attempts") or []:
+                if attempt.get("durable_url"):
+                    attempt["url"] = presign_output_url(attempt["durable_url"])
+    except Exception:
+        # Durable URLs and metadata remain useful even if a temporary URL cannot be refreshed.
+        pass
+    return presented
+
+
+def load_b2_run(run_id: str) -> dict[str, Any] | None:
+    try:
+        response = b2_client().get_object(
+            Bucket=required("B2_BUCKET"),
+            Key=f"brandblaze/indexes/{run_id}.json",
+        )
+        return json.loads(response["Body"].read())
+    except Exception:
+        return None
+
+
+def list_b2_runs(limit: int) -> list[dict[str, Any]]:
+    client = b2_client()
+    response = client.list_objects_v2(
+        Bucket=required("B2_BUCKET"),
+        Prefix="brandblaze/indexes/",
+        MaxKeys=min(limit, 100),
+    )
+    summaries: list[dict[str, Any]] = []
+    for item in sorted(response.get("Contents", []), key=lambda value: value.get("LastModified"), reverse=True):
+        run_id = Path(item["Key"]).stem
+        run = load_b2_run(run_id)
+        if run:
+            summaries.append(run_summary(run))
+    return summaries
+
+
 def provider_for():
     from genblaze_gmicloud import GMICloudImageProvider
 
@@ -188,6 +266,7 @@ def direct_variant_with_claude(
     channel: str,
     environment: str,
     aesthetic: str,
+    correction: str | None = None,
 ) -> str:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
@@ -209,6 +288,12 @@ def direct_variant_with_claude(
                 f"PRODUCT: {product_name}\nMARKET: {market}\nCHANNEL: {channel}\n"
                 f"ENVIRONMENT: {environment}\nAESTHETIC: {aesthetic}\n\n"
                 f"CANONICAL IDENTITY LOCK:\n{identity_map}"
+                + (
+                    "\n\nCORRECTIVE QA DIRECTIVE:\n"
+                    f"The prior attempt failed identity review: {correction}. "
+                    "Correct that drift aggressively while preserving the requested campaign setting."
+                    if correction else ""
+                )
             ),
         }],
     )
@@ -218,7 +303,19 @@ def direct_variant_with_claude(
     return prompt
 
 
-def evaluate_variant_with_claude(source_url: str, output_url: str) -> tuple[int, str]:
+def parse_qa_response(raw: str) -> tuple[int | None, str]:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        result = json.loads(raw)
+        score = max(0, min(100, int(result["score"])))
+        return score, str(result.get("notes") or "No QA notes returned.")[:500]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None, "Claude QA returned an unreadable score; the generated asset was preserved for review."
+
+
+def evaluate_variant_with_claude(source_url: str, output_url: str) -> tuple[int | None, str]:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
         max_tokens=300,
@@ -238,12 +335,7 @@ def evaluate_variant_with_claude(source_url: str, output_url: str) -> tuple[int,
             ],
         }],
     )
-    raw = claude_text(response).strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    result = json.loads(raw)
-    score = max(0, min(100, int(result["score"])))
-    return score, str(result["notes"])[:500]
+    return parse_qa_response(claude_text(response))
 
 
 def update_variant(run_id: str, variant_id: str, **changes: Any) -> None:
@@ -251,6 +343,15 @@ def update_variant(run_id: str, variant_id: str, **changes: Any) -> None:
         for variant in RUNS[run_id]["variants"]:
             if variant["id"] == variant_id:
                 variant.update(changes)
+                persist_run(run_id)
+                break
+
+
+def append_attempt(run_id: str, variant_id: str, attempt: dict[str, Any]) -> None:
+    with RUN_LOCK:
+        for variant in RUNS[run_id]["variants"]:
+            if variant["id"] == variant_id:
+                variant.setdefault("attempts", []).append(attempt)
                 persist_run(run_id)
                 break
 
@@ -265,9 +366,9 @@ def execute_variant(
     source_sha256: str,
     variant: Variant,
 ):
-    update_variant(run_id, variant.id, status="generating")
+    update_variant(run_id, variant.id, status="generating", attempts=[])
     provider, model, provider_label = provider_for()
-    prompt = direct_variant_with_claude(
+    base_prompt = direct_variant_with_claude(
         identity_map,
         product_name,
         variant.market,
@@ -275,47 +376,79 @@ def execute_variant(
         variant.environment,
         aesthetic,
     )
+    threshold = int(os.getenv("IDENTITY_QA_THRESHOLD", "85"))
+    max_attempts = max(1, int(os.getenv("IDENTITY_MAX_ATTEMPTS", "2")))
+    manifests: list[str] = []
+    correction: str | None = None
 
-    step_params: dict[str, Any] = {
-        "model": model,
-        "prompt": prompt,
-        "modality": Modality.IMAGE,
-        "external_inputs": [
-            Asset(url=source_url, media_type=source_media_type, sha256=source_sha256)
-        ],
-        "fallback_models": [item.strip() for item in os.getenv("GENBLAZE_FALLBACK_MODELS", "").split(",") if item.strip()],
-        "size": os.getenv("GMI_IMAGE_SIZE", "2048x2048"),
-        "output_format": os.getenv("GMI_OUTPUT_FORMAT", "png"),
-    }
+    for attempt_number in range(1, max_attempts + 1):
+        prompt = base_prompt
+        if correction:
+            prompt = (
+                f"{base_prompt}\n\nCORRECTIVE QA DIRECTIVE: The prior attempt failed identity review: "
+                f"{correction}. Correct this drift aggressively. Do not change the campaign setting."
+            )
+        step_params: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "modality": Modality.IMAGE,
+            "external_inputs": [
+                Asset(url=source_url, media_type=source_media_type, sha256=source_sha256)
+            ],
+            "fallback_models": [item.strip() for item in os.getenv("GENBLAZE_FALLBACK_MODELS", "").split(",") if item.strip()],
+            "size": os.getenv("GMI_IMAGE_SIZE", "2048x2048"),
+            "output_format": os.getenv("GMI_OUTPUT_FORMAT", "png"),
+        }
+        result = (
+            Pipeline(f"brandblaze-variant-attempt-{attempt_number}", tenant_id=run_id)
+            .step(provider, **step_params)
+            .run(sink=storage_sink(), timeout=int(os.getenv("GENBLAZE_TIMEOUT", "300")))
+        )
+        if not result.run.steps or not result.run.steps[-1].assets:
+            raise RuntimeError("GMI returned no image asset.")
+        asset = result.run.steps[-1].assets[0]
+        if not asset.url or not asset.sha256:
+            raise RuntimeError("Generated asset is missing its B2 URL or SHA-256 digest.")
+        if not result.manifest.verify():
+            raise RuntimeError("Genblaze manifest verification failed.")
 
-    result = (
-        Pipeline("brandblaze-variant", tenant_id=run_id)
-        .step(provider, **step_params)
-        .run(sink=storage_sink(), timeout=int(os.getenv("GENBLAZE_TIMEOUT", "300")))
-    )
+        manifest_url = str(result.manifest.manifest_uri or "")
+        if manifest_url:
+            manifests.append(manifest_url)
+        display_url = presign_output_url(asset.url)
+        try:
+            score, qa_notes = evaluate_variant_with_claude(source_url, display_url)
+        except Exception as exc:
+            score, qa_notes = None, f"Claude QA was unavailable: {exc}"
+        accepted = score is not None and score >= threshold
+        append_attempt(run_id, variant.id, {
+            "attempt": attempt_number,
+            "url": display_url,
+            "durable_url": asset.url,
+            "sha256": asset.sha256,
+            "manifest_url": manifest_url,
+            "prompt": prompt,
+            "score": score,
+            "qa_notes": qa_notes,
+            "outcome": "accepted" if accepted else "rejected",
+        })
+        update_variant(
+            run_id,
+            variant.id,
+            status="ready" if accepted else "reviewing",
+            url=display_url,
+            durable_url=asset.url,
+            provider=provider_label,
+            score=score,
+            qa_notes=qa_notes,
+            sha256=asset.sha256,
+        )
+        if accepted:
+            return manifests
+        correction = qa_notes
 
-    if not result.run.steps or not result.run.steps[-1].assets:
-        raise RuntimeError("GMI returned no image asset.")
-    asset = result.run.steps[-1].assets[0]
-    if not asset.url or not asset.sha256:
-        raise RuntimeError("Generated asset is missing its B2 URL or SHA-256 digest.")
-    verified = result.manifest.verify()
-    if not verified:
-        raise RuntimeError("Genblaze manifest verification failed.")
-    display_url = presign_output_url(asset.url)
-    score, qa_notes = evaluate_variant_with_claude(source_url, display_url)
-    update_variant(
-        run_id,
-        variant.id,
-        status="ready",
-        url=display_url,
-        durable_url=asset.url,
-        provider=provider_label,
-        score=score,
-        qa_notes=qa_notes,
-        sha256=asset.sha256,
-    )
-    return str(result.manifest.manifest_uri or "")
+    update_variant(run_id, variant.id, status="flagged")
+    return manifests
 
 
 def process_run(
@@ -369,9 +502,7 @@ def process_run(
         for future in as_completed(future_map):
             variant = future_map[future]
             try:
-                manifest_url = future.result()
-                if manifest_url:
-                    manifests.append(manifest_url)
+                manifests.extend(future.result())
             except Exception as exc:
                 failures.append(f"{variant.label}: {exc}")
                 update_variant(run_id, variant.id, status="failed")
@@ -379,6 +510,7 @@ def process_run(
     with RUN_LOCK:
         RUNS[run_id]["manifest_urls"] = manifests
         RUNS[run_id]["status"] = "complete" if manifests else "failed"
+        RUNS[run_id]["completed_at"] = utc_now()
         if failures:
             RUNS[run_id]["error"] = " | ".join(failures)
         persist_run(run_id)
@@ -390,6 +522,8 @@ def process_run(
         index["source_url"] = f"b2://{required('B2_BUCKET')}/{index['source_key']}"
         for variant in index["variants"]:
             variant["url"] = variant.get("durable_url")
+            for attempt in variant.get("attempts") or []:
+                attempt["url"] = attempt.get("durable_url")
         b2_client().put_object(
             Bucket=required("B2_BUCKET"),
             Key=key,
@@ -411,7 +545,28 @@ def health():
         "backblaze_b2": bool(os.getenv("B2_BUCKET")),
         "creative_director": "claude" if os.getenv("ANTHROPIC_API_KEY") else None,
         "image_provider": "gmicloud" if os.getenv("GMI_API_KEY") else None,
+        "qa_threshold": int(os.getenv("IDENTITY_QA_THRESHOLD", "85")),
+        "max_attempts": max(1, int(os.getenv("IDENTITY_MAX_ATTEMPTS", "2"))),
     }
+
+
+@app.get("/api/runs")
+def list_runs(
+    include_b2: bool = Query(False),
+    limit: int = Query(25, ge=1, le=100),
+):
+    combined = {run_id: run_summary(run) for run_id, run in RUNS.items()}
+    if include_b2:
+        try:
+            for summary in list_b2_runs(limit):
+                combined.setdefault(summary["run_id"], summary)
+        except Exception as exc:
+            raise HTTPException(503, f"B2 archive read failed: {exc}") from exc
+    return sorted(
+        combined.values(),
+        key=lambda item: item.get("created_at") or "",
+        reverse=True,
+    )[:limit]
 
 
 @app.post("/api/runs", status_code=202)
@@ -431,6 +586,9 @@ async def create_run(
     if file.content_type not in {"image/jpeg", "image/png", "image/webp"}:
         raise HTTPException(415, "Use a PNG, JPG, or WEBP product image.")
     payload = await file.read()
+    actual_media_type = detected_media_type(payload)
+    if actual_media_type != file.content_type:
+        raise HTTPException(415, "The image bytes do not match the declared PNG, JPG, or WEBP type.")
     if len(payload) > 20 * 1024 * 1024:
         raise HTTPException(413, "Product image exceeds 20 MB.")
 
@@ -484,6 +642,10 @@ async def create_run(
         "product_name": product_name,
         "aesthetic": aesthetic,
         "source_sha256": source_sha256,
+        "source_media_type": actual_media_type,
+        "created_at": utc_now(),
+        "qa_threshold": int(os.getenv("IDENTITY_QA_THRESHOLD", "85")),
+        "max_attempts": max(1, int(os.getenv("IDENTITY_MAX_ATTEMPTS", "2"))),
         "variants": [asdict(item) for item in variants],
         "manifest_urls": [],
     }
@@ -508,5 +670,49 @@ async def create_run(
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str):
     if run_id not in RUNS:
+        archived = load_b2_run(run_id)
+        if not archived:
+            raise HTTPException(404, "Run not found.")
+        RUNS[run_id] = archived
+        persist_run(run_id)
+    return present_run(RUNS[run_id])
+
+
+@app.get("/api/runs/{run_id}/export")
+def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$")):
+    run = RUNS.get(run_id) or load_b2_run(run_id)
+    if not run:
         raise HTTPException(404, "Run not found.")
-    return RUNS[run_id]
+    if format == "json":
+        return Response(
+            json.dumps(run, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="brandblaze-{run_id}.json"'},
+        )
+    output = io.StringIO()
+    fields = [
+        "run_id", "product_name", "variant_id", "market", "channel", "environment",
+        "status", "score", "qa_notes", "sha256", "durable_url", "provider",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    for variant in run.get("variants", []):
+        writer.writerow({
+            "run_id": run_id,
+            "product_name": run.get("product_name"),
+            "variant_id": variant.get("id"),
+            "market": variant.get("market"),
+            "channel": variant.get("channel"),
+            "environment": variant.get("environment"),
+            "status": variant.get("status"),
+            "score": variant.get("score"),
+            "qa_notes": variant.get("qa_notes"),
+            "sha256": variant.get("sha256"),
+            "durable_url": variant.get("durable_url"),
+            "provider": variant.get("provider"),
+        })
+    return Response(
+        output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="brandblaze-{run_id}.csv"'},
+    )

@@ -8,12 +8,24 @@ type Variant = {
   market: string;
   channel: string;
   environment: string;
-  status: "queued" | "generating" | "ready" | "failed";
+  status: "queued" | "generating" | "reviewing" | "ready" | "flagged" | "failed";
   url?: string;
   provider?: string;
   score?: number;
   qa_notes?: string;
   sha256?: string;
+  attempts?: Attempt[];
+};
+
+type Attempt = {
+  attempt: number;
+  url?: string;
+  durable_url?: string;
+  sha256?: string;
+  manifest_url?: string;
+  score?: number;
+  qa_notes?: string;
+  outcome: "accepted" | "rejected";
 };
 
 type ReactorRun = {
@@ -22,7 +34,23 @@ type ReactorRun = {
   variants: Variant[];
   manifest_urls?: string[];
   identity_map?: string;
+  source_url?: string;
+  product_name?: string;
+  created_at?: string;
+  qa_threshold?: number;
+  max_attempts?: number;
   error?: string;
+};
+
+type RunSummary = {
+  run_id: string;
+  product_name?: string;
+  status: string;
+  aesthetic?: string;
+  created_at?: string;
+  variant_count: number;
+  ready_count: number;
+  flagged_count: number;
 };
 
 type Health = {
@@ -30,6 +58,8 @@ type Health = {
   backblaze_b2: boolean;
   creative_director: string | null;
   image_provider: string | null;
+  qa_threshold: number;
+  max_attempts: number;
 };
 
 const API_URL =
@@ -57,12 +87,18 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [health, setHealth] = useState<Health | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveRuns, setArchiveRuns] = useState<RunSummary[]>([]);
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null);
 
   const plannedCount = useMemo(
     () => Math.min(selectedMarkets.length * selectedChannels.length * selectedEnvironments.length, 12),
     [selectedMarkets, selectedChannels, selectedEnvironments],
   );
   const requestedCount = selectedMarkets.length * selectedChannels.length * selectedEnvironments.length;
+  const baselineClaudeCalls = 1 + plannedCount * 2;
+  const maximumClaudeCalls = 1 + plannedCount * 3;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -141,9 +177,44 @@ export default function Home() {
     }, 1800);
   }
 
+  async function openArchive() {
+    setArchiveOpen(true);
+    setArchiveBusy(true);
+    try {
+      const response = await fetch(`${API_URL}/api/runs?include_b2=true&limit=40`);
+      if (!response.ok) throw new Error(await response.text());
+      setArchiveRuns(await response.json());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load the B2 archive.");
+    } finally {
+      setArchiveBusy(false);
+    }
+  }
+
+  async function openArchivedRun(runId: string) {
+    try {
+      const response = await fetch(`${API_URL}/api/runs/${runId}`);
+      if (!response.ok) throw new Error(await response.text());
+      const archived = (await response.json()) as ReactorRun;
+      setRun(archived);
+      setProductName(archived.product_name ?? "Archived product");
+      setPreview(archived.source_url ?? null);
+      setArchiveOpen(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not open the archived run.");
+    }
+  }
+
   const shownVariants = run?.variants ?? [];
   const readyCount = run?.variants.filter((item) => item.status === "ready").length ?? 0;
-  const queuedCount = run?.variants.filter((item) => item.status === "queued" || item.status === "generating").length ?? 0;
+  const flaggedCount = run?.variants.filter((item) => item.status === "flagged").length ?? 0;
+  const queuedCount = run?.variants.filter((item) => ["queued", "generating", "reviewing"].includes(item.status)).length ?? 0;
+  const groupedVariants = Object.entries(
+    shownVariants.reduce<Record<string, Variant[]>>((groups, variant) => {
+      (groups[variant.market] ??= []).push(variant);
+      return groups;
+    }, {}),
+  );
   const pipelineSteps = ["Ingest to B2", "Claude identity map", "GMI generation", "Claude visual QA", "Commit manifests"];
   const stageClass = (index: number) => {
     if (!run) return "";
@@ -166,7 +237,7 @@ export default function Home() {
             ? "Pipeline configured"
             : health ? "Setup incomplete" : "Backend offline"}
         </div>
-        <span className="ghostButton">{run ? `RUN ${run.run_id}` : "READY FOR SOURCE"}</span>
+        <button className="ghostButton" type="button" onClick={openArchive}>B2 run archive <span>↗</span></button>
       </nav>
 
       <section className="hero">
@@ -208,6 +279,12 @@ export default function Home() {
           </div>
 
           {error && <p className="error">{error}</p>}
+          <div className="costPreview">
+            <b>Run budget</b>
+            <span>{plannedCount}–{plannedCount * 2} GMI images</span>
+            <span>{baselineClaudeCalls}–{maximumClaudeCalls} Claude calls</span>
+            <small>Up to {(health?.max_attempts ?? 2) - 1} corrective retry is allowed when identity QA falls below {health?.qa_threshold ?? 85}%.</small>
+          </div>
           <button className="reactButton" type="button" onClick={startReactor} disabled={busy}>
             <span>{busy ? "Reactor running" : "React product"}</span>
             <b>{plannedCount} variants{requestedCount > 12 ? " · first 12" : ""}</b>
@@ -224,6 +301,7 @@ export default function Home() {
             <div className="runStats">
               <span><b>{queuedCount}</b> in progress</span>
               <span><b>{readyCount}</b> verified</span>
+              <span><b>{flaggedCount}</b> flagged</span>
               <span><b>{run?.manifest_urls?.length ?? 0}</b> manifests</span>
             </div>
           </div>
@@ -233,48 +311,104 @@ export default function Home() {
               <div className={stageClass(index)} key={step}><i>{stageClass(index) === "done" ? "✓" : index + 1}</i><span>{step}</span></div>
             ))}
           </div>
-          {run?.error && <p className="runError"><b>Run stopped:</b> {run.error}</p>}
+          {run?.error && <p className="runError"><b>Run notice:</b> {run.error}</p>}
           {run?.identity_map && (
             <details className="identityMap">
               <summary>Claude identity map <span>View canonical product constraints</span></summary>
               <pre>{run.identity_map}</pre>
             </details>
           )}
+          {run && (
+            <div className="exportBar">
+              <span>Campaign handoff</span>
+              <a href={`${API_URL}/api/runs/${run.run_id}/export?format=json`}>Export JSON</a>
+              <a href={`${API_URL}/api/runs/${run.run_id}/export?format=csv`}>Export CSV</a>
+            </div>
+          )}
 
-          <div className="assetGrid">
+          <div className="campaignBoard">
             {!shownVariants.length && (
               <div className="emptyMatrix">
-                <span>AR / 00</span>
+                <span>BB / 00</span>
                 <h3>Your generated asset matrix will appear here.</h3>
                 <p>Upload a real product image, choose a small first batch, and start the reactor.</p>
               </div>
             )}
-            {shownVariants.map((variant, index) => (
-              <article className={`assetCard ${variant.status}`} key={variant.id}>
-                <div className={`art art${index + 1}`}>
-                  {variant.url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={variant.url} alt={`${productName}: ${variant.label}`} />
-                  ) : run && preview ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img className="pendingReference" src={preview} alt="Source image awaiting generation" />
-                  ) : <div className="awaitingAsset">Awaiting<br />generation</div>}
-                  <span className="score">{variant.score != null ? `${variant.score}% identity` : variant.status === "failed" ? "generation failed" : variant.status}</span>
+            {groupedVariants.map(([market, variants]) => (
+              <section className="marketGroup" key={market}>
+                <div className="marketHeading"><h3>{market}</h3><span>{variants.length} campaign assets</span></div>
+                <div className="assetGrid">
+                  {variants.map((variant, index) => (
+                    <article className={`assetCard ${variant.status}`} key={variant.id}>
+                      <button className={`art art${(index % 8) + 1}`} type="button" onClick={() => variant.url && setSelectedVariant(variant)}>
+                        {variant.url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={variant.url} alt={`${productName}: ${variant.label}`} />
+                        ) : run && preview ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img className="pendingReference" src={preview} alt="Source image awaiting generation" />
+                        ) : <span className="awaitingAsset">Awaiting<br />generation</span>}
+                        <span className="score">{variant.score != null ? `${variant.score}% identity` : variant.status === "failed" ? "generation failed" : variant.status}</span>
+                        {(variant.attempts?.length ?? 0) > 1 && <span className="retryBadge">{variant.attempts?.length} attempts</span>}
+                      </button>
+                      <div className="assetInfo">
+                        <div>
+                          <h3>{variant.label}</h3>
+                          <p>{variant.market} · {variant.channel}</p>
+                          {variant.qa_notes && <p className="qaNote">{variant.qa_notes}</p>}
+                        </div>
+                        <div className="assetActions">
+                          <span>{variant.status}</span>
+                          {variant.url && <button type="button" onClick={() => setSelectedVariant(variant)}>Compare</button>}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
                 </div>
-                <div className="assetInfo">
-                  <div>
-                    <h3>{variant.label}</h3>
-                    <p>{variant.market} · {variant.channel}</p>
-                    {variant.qa_notes && <p className="qaNote">{variant.qa_notes}</p>}
-                  </div>
-                  <div className="assetActions">
-                    <span>{variant.provider ?? variant.status}</span>
-                    {variant.url && <a href={variant.url} target="_blank" rel="noreferrer">Open ↗</a>}
-                  </div>
-                </div>
-              </article>
+              </section>
             ))}
           </div>
+
+          {selectedVariant && (
+            <div className="modalBackdrop" role="presentation" onClick={() => setSelectedVariant(null)}>
+              <section className="compareModal" role="dialog" aria-modal="true" aria-label="Identity comparison" onClick={(event) => event.stopPropagation()}>
+                <header><div><span>IDENTITY INSPECTOR</span><h2>{selectedVariant.label}</h2></div><button type="button" onClick={() => setSelectedVariant(null)}>×</button></header>
+                <div className="compareGrid">
+                  <figure>
+                    {run?.source_url || preview ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={run?.source_url || preview || ""} alt="Canonical source product" />
+                    ) : null}
+                    <figcaption>Canonical source</figcaption>
+                  </figure>
+                  <figure>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={selectedVariant.url} alt="Generated campaign variant" />
+                    <figcaption>Generated output</figcaption>
+                  </figure>
+                </div>
+                <div className="qaPanel"><b>{selectedVariant.score ?? "—"}% identity</b><p>{selectedVariant.qa_notes}</p><span>{selectedVariant.attempts?.length ?? 1} attempt(s) · {selectedVariant.status}</span></div>
+                {selectedVariant.attempts && selectedVariant.attempts.length > 1 && (
+                  <div className="attemptTimeline">
+                    {selectedVariant.attempts.map((attempt) => <span className={attempt.outcome} key={attempt.attempt}>Attempt {attempt.attempt}: {attempt.score ?? "QA unavailable"} · {attempt.outcome}</span>)}
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {archiveOpen && (
+            <div className="archiveDrawer">
+              <header><div><span>BACKBLAZE B2</span><h2>Campaign archive</h2></div><button type="button" onClick={() => setArchiveOpen(false)}>×</button></header>
+              {archiveBusy ? <p>Reading B2 indexes…</p> : archiveRuns.map((item) => (
+                <button className="archiveRun" type="button" key={item.run_id} onClick={() => openArchivedRun(item.run_id)}>
+                  <span><b>{item.product_name || "Untitled product"}</b><small>{item.run_id} · {item.created_at ? new Date(item.created_at).toLocaleString() : "date unavailable"}</small></span>
+                  <span>{item.ready_count} verified · {item.flagged_count} flagged</span>
+                </button>
+              ))}
+              {!archiveBusy && !archiveRuns.length && <p>No persisted campaigns found.</p>}
+            </div>
+          )}
 
           <footer className="vaultBar">
             <div><span className="vaultIcon">B2</span><p><b>Backblaze asset vault</b><small>Content-addressed originals, variants, and SHA-256 manifests</small></p></div>
