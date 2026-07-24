@@ -260,16 +260,15 @@ PowerShell requires the leading `&` when the executable path is quoted.
 
 ## Using the application
 
-1. Upload a clear product photograph.
-2. Enter a product name.
-3. Describe the immutable identity lock.
-4. Select or add custom markets.
-5. Select or add custom channels.
-6. Select or add custom environments.
-7. Choose an art direction.
-8. Review the planned variant count.
-9. Select **React product**.
-10. Keep the backend running until all variants complete.
+Open `http://localhost:3000` for the public product story, then select **Open studio** to enter the campaign workspace at `http://localhost:3000/studio`.
+
+The studio uses three editable steps:
+
+1. **Product:** upload a clear photograph, enter the product name, and describe the immutable identity lock.
+2. **Campaign:** select or add markets, channels, environments, and an art direction.
+3. **Review:** confirm the campaign matrix and maximum provider-call budget, then select **Generate campaign**.
+
+Keep the backend running until all variants complete. The live asset matrix shows pipeline progress without mixing the product setup into the public landing page.
 
 For the first paid test, use one market, one channel, and one environment. Expand the matrix only after validating the result.
 
@@ -400,7 +399,9 @@ Stopping or reloading the backend terminates in-process worker threads. Persiste
 
 ```text
 brandblaze/
-|-- app/                  # React interface
+|-- app/
+|   |-- page.tsx         # Public landing page
+|   `-- studio/page.tsx  # Three-step campaign workspace
 |-- api/
 |   |-- main.py           # FastAPI and generation pipeline
 |   |-- requirements.txt
