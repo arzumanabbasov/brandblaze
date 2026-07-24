@@ -21,6 +21,7 @@ __pycache__/
 # next.js
 /.next/
 /.vinext/
+/.output/
 /out/
 
 # misc
