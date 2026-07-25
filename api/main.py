@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 import boto3
@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 from genblaze_core import Asset, KeyStrategy, Modality, ObjectStorageSink, Pipeline
 from genblaze_s3 import S3StorageBackend
@@ -43,6 +44,7 @@ class Variant:
     market: str
     channel: str
     environment: str
+    objective: str | None = None
     status: str = "queued"
     url: str | None = None
     durable_url: str | None = None
@@ -51,6 +53,11 @@ class Variant:
     qa_notes: str | None = None
     critical_drift: bool = False
     qa_violations: list[str] | None = None
+    qa_axes: dict[str, int] | None = None
+    failed_constraint_ids: list[str] | None = None
+    repair_plan: dict[str, Any] | None = None
+    approval_status: str = "pending"
+    approval_note: str | None = None
     sha256: str | None = None
     attempts: list[dict[str, Any]] | None = None
 
@@ -78,6 +85,32 @@ def load_runs() -> dict[str, dict[str, Any]]:
 
 RUNS: dict[str, dict[str, Any]] = load_runs()
 RUN_LOCK = threading.Lock()
+
+CHANNEL_REQUIREMENTS = {
+    "Amazon": "Marketplace hero: full product visible, clean composition, minimal props, generous safe margins, no text, dominant product recognition.",
+    "E-commerce PDP": "PDP-ready: full product visible, accurate scale and color, clean hierarchy, minimal props, consistent safe margins.",
+    "Instagram": "Mobile-first awareness image: immediate focal hierarchy, strong first-frame impact, crop-safe center, intentional negative space.",
+    "TikTok": "Vertical mobile composition: immediate product recognition, energetic depth, crop-safe center, uncluttered silhouette.",
+    "Billboard": "Long-distance readability: simple silhouette, extreme product recognition, minimal clutter, bold tonal separation.",
+    "Email": "Campaign email composition: headline-safe negative space, landscape-friendly hierarchy, CTA-safe region, clear product focal point.",
+    "Editorial": "Authored editorial composition with atmospheric context while preserving unmistakable commercial product recognition.",
+    "Retail display": "Retail display composition: strong recognition from distance, environmental context, no product obstruction.",
+    "Pinterest": "Save-worthy vertical composition with clear product hierarchy, tactile detail, and crop-safe negative space.",
+    "Print campaign": "High-resolution print composition with deliberate negative space, controlled detail, and premium product prominence.",
+}
+
+CHANNEL_OBJECTIVES = {
+    "Amazon": "Conversion-ready marketplace hero",
+    "E-commerce PDP": "Product-detail page conversion",
+    "Instagram": "Mobile awareness and engagement",
+    "TikTok": "Scroll-stopping mobile awareness",
+    "Billboard": "Long-distance brand recognition",
+    "Email": "Launch message with CTA-safe space",
+    "Editorial": "Brand storytelling and desirability",
+    "Retail display": "In-store recognition and context",
+    "Pinterest": "Discovery and visual consideration",
+    "Print campaign": "Premium campaign storytelling",
+}
 
 
 def persist_run(run_id: str) -> None:
@@ -120,7 +153,48 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
         "variant_count": len(variants),
         "ready_count": sum(item.get("status") == "ready" for item in variants),
         "flagged_count": sum(item.get("status") == "flagged" for item in variants),
+        "approved_count": sum(item.get("approval_status") == "approved" for item in variants),
     }
+
+
+def plan_variants(
+    markets: list[str],
+    channels: list[str],
+    environments: list[str],
+    limit: int,
+) -> list[Variant]:
+    candidates = [
+        (market, channel, environment)
+        for market in markets for channel in channels for environment in environments
+    ]
+    chosen: list[tuple[str, str, str]] = []
+    while candidates and len(chosen) < limit:
+        def coverage_score(item: tuple[str, str, str]) -> tuple[int, int, int, int]:
+            market, channel, environment = item
+            seen_m = sum(existing[0] == market for existing in chosen)
+            seen_c = sum(existing[1] == channel for existing in chosen)
+            seen_e = sum(existing[2] == environment for existing in chosen)
+            seen_pairs = sum(
+                (existing[0], existing[1]) == (market, channel)
+                or (existing[0], existing[2]) == (market, environment)
+                or (existing[1], existing[2]) == (channel, environment)
+                for existing in chosen
+            )
+            return (-seen_pairs, -seen_m, -seen_c, -seen_e)
+        best = max(candidates, key=coverage_score)
+        chosen.append(best)
+        candidates.remove(best)
+    return [
+        Variant(
+            id=uuid.uuid4().hex[:10],
+            label=f"{environment} / {channel}",
+            market=market,
+            channel=channel,
+            environment=environment,
+            objective=CHANNEL_OBJECTIVES.get(channel, "Commercial product communication"),
+        )
+        for market, channel, environment in chosen
+    ]
 
 
 def b2_client():
@@ -219,6 +293,21 @@ def list_b2_runs(limit: int) -> list[dict[str, Any]]:
     return summaries
 
 
+def persist_b2_index(run_id: str) -> None:
+    index = json.loads(json.dumps(RUNS[run_id]))
+    index["source_url"] = f"b2://{required('B2_BUCKET')}/{index['source_key']}"
+    for variant in index["variants"]:
+        variant["url"] = variant.get("durable_url")
+        for attempt in variant.get("attempts") or []:
+            attempt["url"] = attempt.get("durable_url")
+    b2_client().put_object(
+        Bucket=required("B2_BUCKET"),
+        Key=f"brandblaze/indexes/{run_id}.json",
+        Body=json.dumps(index, indent=2).encode(),
+        ContentType="application/json",
+    )
+
+
 def provider_for():
     from genblaze_gmicloud import GMICloudImageProvider
 
@@ -232,17 +321,79 @@ def claude_text(message) -> str:
     ).strip()
 
 
-def analyze_product_with_claude(source_url: str, product_name: str, user_brief: str) -> str:
+def parse_json_object(raw: str) -> dict[str, Any]:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object.")
+    return value
+
+
+def normalize_identity_spec(raw: str) -> dict[str, Any]:
+    value = parse_json_object(raw)
+    constraints: list[dict[str, Any]] = []
+    for index, item in enumerate(value.get("constraints") or [], 1):
+        if not isinstance(item, dict) or not str(item.get("description") or "").strip():
+            continue
+        dimension = str(item.get("dimension") or "identity").lower().replace(" ", "_")
+        prefix = "".join(part[0] for part in dimension.split("_") if part)[:3].upper() or "ID"
+        constraints.append({
+            "id": str(item.get("id") or f"{prefix}-{index:02d}")[:24],
+            "dimension": dimension[:40],
+            "description": str(item["description"]).strip()[:500],
+            "confidence": max(0.0, min(1.0, float(item.get("confidence", 0.7)))),
+            "evidence": str(item.get("evidence") or "observed")[:40],
+            "hard": bool(item.get("hard", True)),
+        })
+    if not constraints:
+        raise ValueError("Claude returned no usable identity constraints.")
+    return {
+        "version": 1,
+        "canonical_name": str(value.get("canonical_name") or "Unnamed product")[:160],
+        "product_category": str(value.get("product_category") or "product")[:100],
+        "constraints": constraints,
+        "camera_evidence": value.get("camera_evidence") if isinstance(value.get("camera_evidence"), dict) else {},
+        "unknown_or_ambiguous_details": [
+            str(item)[:240] for item in (value.get("unknown_or_ambiguous_details") or [])
+            if isinstance(item, str)
+        ][:12],
+    }
+
+
+def format_identity_spec(spec: dict[str, Any]) -> str:
+    lines = [f"{spec.get('canonical_name', 'Product')} · {spec.get('product_category', 'product')}"]
+    for item in spec.get("constraints", []):
+        confidence = round(float(item.get("confidence", 0)) * 100)
+        strength = "HARD" if item.get("hard") else "SOFT"
+        lines.append(
+            f"[{item.get('id')}] {strength} {str(item.get('dimension', 'identity')).upper()} "
+            f"({confidence}% confidence): {item.get('description')}"
+        )
+    unknown = spec.get("unknown_or_ambiguous_details") or []
+    if unknown:
+        lines.append("DO NOT INVENT: " + "; ".join(unknown))
+    return "\n".join(lines)
+
+
+def analyze_product_with_claude(source_url: str, product_name: str, user_brief: str) -> dict[str, Any]:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        max_tokens=900,
+        max_tokens=1400,
         temperature=0.2,
         system=(
             "You are the visual continuity director for a world-class product photography studio. "
-            "Inspect the reference with forensic care. Build a compact identity lock another image "
-            "model can follow. Separate immutable product geometry from mutable art direction. Never "
-            "invent features you cannot see. Return plain text under exactly these headings: "
-            "IMMUTABLE IDENTITY, MATERIAL & SURFACE, LOGO/TYPOGRAPHY, CAMERA EVIDENCE, NEVER CHANGE."
+            "Inspect the reference with forensic care and produce a machine-readable product contract. "
+            "Separate immutable identity from mutable art direction. Never invent occluded details. "
+            "Return valid JSON only with this schema: "
+            "{\"canonical_name\":\"\", \"product_category\":\"\", \"constraints\":["
+            "{\"id\":\"GEO-01\",\"dimension\":\"geometry|component_count|color|material|logo|text|hardware|surface\","
+            "\"description\":\"observable requirement\",\"confidence\":0.0,\"evidence\":\"observed|owner_provided|inferred\","
+            "\"hard\":true}],\"camera_evidence\":{\"visible_faces\":[],\"occluded_details\":[],"
+            "\"view_limitations\":[]},\"unknown_or_ambiguous_details\":[]}. "
+            "Use stable unique constraint IDs. Treat visible or owner-specified logos, text, component "
+            "count, geometry, color, material, and distinctive hardware as hard constraints."
         ),
         messages=[{
             "role": "user",
@@ -258,7 +409,7 @@ def analyze_product_with_claude(source_url: str, product_name: str, user_brief: 
     identity = claude_text(response)
     if not identity:
         raise RuntimeError("Claude returned an empty identity map.")
-    return identity
+    return normalize_identity_spec(identity)
 
 
 def direct_variant_with_claude(
@@ -268,12 +419,12 @@ def direct_variant_with_claude(
     channel: str,
     environment: str,
     aesthetic: str,
-    correction: str | None = None,
+    repair_plan: dict[str, Any] | None = None,
 ) -> str:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
         max_tokens=1100,
-        temperature=0.65,
+        temperature=0.35,
         system=(
             "You are an elite commercial art director writing executable prompts for a high-end "
             "image-editing model. Create one decisive photographic concept, not options. The reference "
@@ -291,13 +442,15 @@ def direct_variant_with_claude(
             "role": "user",
             "content": (
                 f"PRODUCT: {product_name}\nMARKET: {market}\nCHANNEL: {channel}\n"
-                f"ENVIRONMENT: {environment}\nAESTHETIC: {aesthetic}\n\n"
+                f"ENVIRONMENT: {environment}\nAESTHETIC: {aesthetic}\n"
+                f"CAMPAIGN OBJECTIVE: {CHANNEL_OBJECTIVES.get(channel, 'Clear commercial product communication')}\n"
+                f"CHANNEL REQUIREMENTS: {CHANNEL_REQUIREMENTS.get(channel, 'Keep the product dominant, legible, and crop-safe.')}\n\n"
                 f"CANONICAL IDENTITY LOCK:\n{identity_map}"
                 + (
-                    "\n\nCORRECTIVE QA DIRECTIVE:\n"
-                    f"The prior attempt failed identity review: {correction}. "
-                    "Correct that drift aggressively while preserving the requested campaign setting."
-                    if correction else ""
+                    "\n\nTARGETED REPAIR CONTRACT:\n"
+                    f"{json.dumps(repair_plan, indent=2)}\n"
+                    "Fix only failed constraints and preserve the successful creative elements."
+                    if repair_plan else ""
                 )
             ),
         }],
@@ -308,26 +461,55 @@ def direct_variant_with_claude(
     return prompt
 
 
-def parse_qa_response(raw: str) -> tuple[int | None, str, bool, list[str]]:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+QA_AXES = (
+    "geometry", "component_count", "color", "material", "logo_markings",
+    "text_integrity", "product_prominence", "channel_fit",
+)
+
+
+def parse_qa_response(raw: str) -> dict[str, Any]:
     try:
-        result = json.loads(raw)
+        result = parse_json_object(raw)
         score = max(0, min(100, int(result["score"])))
+        axes = {
+            axis: max(0, min(100, int((result.get("axes") or {}).get(axis, score))))
+            for axis in QA_AXES
+        }
         violations = [
             str(item)[:180]
             for item in result.get("violations", [])
             if isinstance(item, str) and item.strip()
         ][:8]
-        return (
-            score,
-            str(result.get("notes") or "No QA notes returned.")[:500],
-            bool(result.get("critical_drift", False)),
-            violations,
-        )
+        failed_ids = [
+            str(item)[:24] for item in result.get("failed_constraint_ids", [])
+            if isinstance(item, str) and item.strip()
+        ][:12]
+        repair = result.get("repair_plan") if isinstance(result.get("repair_plan"), dict) else {}
+        return {
+            "score": score,
+            "notes": str(result.get("notes") or "No QA notes returned.")[:500],
+            "critical_drift": bool(result.get("critical_drift", False)),
+            "violations": violations,
+            "axes": axes,
+            "failed_constraint_ids": failed_ids,
+            "repair_plan": {
+                "severity": str(repair.get("severity") or ("critical" if result.get("critical_drift") else "moderate"))[:20],
+                "protected_constraints": [str(item)[:24] for item in repair.get("protected_constraints", []) if isinstance(item, str)][:12],
+                "preserved_creative_elements": [str(item)[:160] for item in repair.get("preserved_creative_elements", []) if isinstance(item, str)][:8],
+                "repair_instruction": str(repair.get("repair_instruction") or result.get("notes") or "")[:600],
+                "retry_recommended": bool(repair.get("retry_recommended", True)),
+            },
+        }
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return None, "Claude QA returned an unreadable score; the generated asset was preserved for review.", True, ["QA result was unreadable"]
+        return {
+            "score": None,
+            "notes": "Claude QA returned an unreadable score; the generated asset was preserved for review.",
+            "critical_drift": True,
+            "violations": ["QA result was unreadable"],
+            "axes": {},
+            "failed_constraint_ids": [],
+            "repair_plan": {"severity": "unknown", "retry_recommended": False, "repair_instruction": "Human review required."},
+        }
 
 
 def identity_passes(score: int | None, threshold: int, critical_drift: bool) -> bool:
@@ -338,10 +520,11 @@ def evaluate_variant_with_claude(
     source_url: str,
     output_url: str,
     identity_map: str,
-) -> tuple[int | None, str, bool, list[str]]:
+    channel: str,
+) -> dict[str, Any]:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        max_tokens=300,
+        max_tokens=800,
         temperature=0,
         system=(
             "You are a strict product-continuity inspector. Compare the source product in image one "
@@ -351,8 +534,13 @@ def evaluate_variant_with_claude(
             "construction. Set critical_drift=true when any named logo or marking is missing or altered, "
             "the primary color or material changes, a distinctive component is missing or added, or core "
             "geometry changes. A critical defect cannot be compensated for by overall visual similarity. "
-            "Return valid JSON only: {\"score\": integer 0-100, \"critical_drift\": boolean, "
-            "\"violations\": [\"short defect\"], \"notes\": \"one concise sentence\"}."
+            "Return valid JSON only: {\"score\":0,\"critical_drift\":false,"
+            "\"axes\":{\"geometry\":0,\"component_count\":0,\"color\":0,\"material\":0,"
+            "\"logo_markings\":0,\"text_integrity\":0,\"product_prominence\":0,\"channel_fit\":0},"
+            "\"failed_constraint_ids\":[],\"violations\":[],\"notes\":\"\","
+            "\"repair_plan\":{\"severity\":\"minor|moderate|critical\",\"protected_constraints\":[],"
+            "\"preserved_creative_elements\":[],\"repair_instruction\":\"specific edit instruction\","
+            "\"retry_recommended\":true}}."
         ),
         messages=[{
             "role": "user",
@@ -361,7 +549,11 @@ def evaluate_variant_with_claude(
                 {"type": "image", "source": {"type": "url", "url": output_url}},
                 {
                     "type": "text",
-                    "text": f"Evaluate product identity preservation.\n\nCANONICAL IDENTITY LOCK:\n{identity_map}",
+                    "text": (
+                        f"Evaluate identity and channel fitness.\n\nCANONICAL IDENTITY LOCK:\n{identity_map}\n\n"
+                        f"CHANNEL: {channel}\nREQUIREMENTS: "
+                        f"{CHANNEL_REQUIREMENTS.get(channel, 'Product must be dominant and crop-safe.')}"
+                    ),
                 },
             ],
         }],
@@ -396,8 +588,20 @@ def execute_variant(
     source_media_type: str,
     source_sha256: str,
     variant: Variant,
+    preserve_attempts: bool = False,
 ):
-    update_variant(run_id, variant.id, status="generating", attempts=[])
+    existing_attempts = next(
+        (item.get("attempts") or [] for item in RUNS[run_id]["variants"] if item["id"] == variant.id),
+        [],
+    )
+    update_variant(
+        run_id,
+        variant.id,
+        status="generating",
+        approval_status="pending",
+        approval_note=None,
+        attempts=existing_attempts if preserve_attempts else [],
+    )
     provider, model, provider_label = provider_for()
     base_prompt = direct_variant_with_claude(
         identity_map,
@@ -410,14 +614,21 @@ def execute_variant(
     threshold = int(os.getenv("IDENTITY_QA_THRESHOLD", "85"))
     max_attempts = max(1, int(os.getenv("IDENTITY_MAX_ATTEMPTS", "2")))
     manifests: list[str] = []
-    correction: str | None = None
+    repair_plan: dict[str, Any] | None = None
+    attempt_offset = len(existing_attempts) if preserve_attempts else 0
 
-    for attempt_number in range(1, max_attempts + 1):
+    for local_attempt in range(1, max_attempts + 1):
+        attempt_number = attempt_offset + local_attempt
         prompt = base_prompt
-        if correction:
-            prompt = (
-                f"{base_prompt}\n\nCORRECTIVE QA DIRECTIVE: The prior attempt failed identity review: "
-                f"{correction}. Correct this drift aggressively. Do not change the campaign setting."
+        if repair_plan:
+            prompt = direct_variant_with_claude(
+                identity_map,
+                product_name,
+                variant.market,
+                variant.channel,
+                variant.environment,
+                aesthetic,
+                repair_plan,
             )
         step_params: dict[str, Any] = {
             "model": model,
@@ -448,18 +659,23 @@ def execute_variant(
             manifests.append(manifest_url)
         display_url = presign_output_url(asset.url)
         try:
-            score, qa_notes, critical_drift, qa_violations = evaluate_variant_with_claude(
+            qa = evaluate_variant_with_claude(
                 source_url,
                 display_url,
                 identity_map,
+                variant.channel,
             )
         except Exception as exc:
-            score, qa_notes, critical_drift, qa_violations = (
-                None,
-                f"Claude QA was unavailable: {exc}",
-                True,
-                ["QA service was unavailable"],
-            )
+            qa = {
+                "score": None, "notes": f"Claude QA was unavailable: {exc}",
+                "critical_drift": True, "violations": ["QA service was unavailable"],
+                "axes": {}, "failed_constraint_ids": [],
+                "repair_plan": {"retry_recommended": False, "repair_instruction": "Human review required."},
+            }
+        score = qa["score"]
+        qa_notes = qa["notes"]
+        critical_drift = qa["critical_drift"]
+        qa_violations = qa["violations"]
         accepted = identity_passes(score, threshold, critical_drift)
         append_attempt(run_id, variant.id, {
             "attempt": attempt_number,
@@ -472,6 +688,9 @@ def execute_variant(
             "qa_notes": qa_notes,
             "critical_drift": critical_drift,
             "qa_violations": qa_violations,
+            "qa_axes": qa["axes"],
+            "failed_constraint_ids": qa["failed_constraint_ids"],
+            "repair_plan": qa["repair_plan"],
             "outcome": "accepted" if accepted else "rejected",
         })
         update_variant(
@@ -485,11 +704,16 @@ def execute_variant(
             qa_notes=qa_notes,
             critical_drift=critical_drift,
             qa_violations=qa_violations,
+            qa_axes=qa["axes"],
+            failed_constraint_ids=qa["failed_constraint_ids"],
+            repair_plan=qa["repair_plan"],
             sha256=asset.sha256,
         )
         if accepted:
             return manifests
-        correction = qa_notes
+        repair_plan = qa["repair_plan"]
+        if not repair_plan.get("retry_recommended", True):
+            break
 
     update_variant(run_id, variant.id, status="flagged")
     return manifests
@@ -512,8 +736,10 @@ def process_run(
     manifests: list[str] = []
     failures: list[str] = []
     try:
-        identity_map = analyze_product_with_claude(source_url, product_name, brief)
+        identity_spec = analyze_product_with_claude(source_url, product_name, brief)
+        identity_map = format_identity_spec(identity_spec)
         with RUN_LOCK:
+            RUNS[run_id]["identity_spec"] = identity_spec
             RUNS[run_id]["identity_map"] = identity_map
             RUNS[run_id]["creative_director"] = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
             RUNS[run_id]["image_provider"] = f"GMI Cloud / {os.getenv('GMI_IMAGE_MODEL', 'seedream-5.0-lite')}"
@@ -560,20 +786,8 @@ def process_run(
         persist_run(run_id)
 
     # Persist the application-level index beside Genblaze's per-run manifests.
-    key = f"brandblaze/indexes/{run_id}.json"
     try:
-        index = json.loads(json.dumps(RUNS[run_id]))
-        index["source_url"] = f"b2://{required('B2_BUCKET')}/{index['source_key']}"
-        for variant in index["variants"]:
-            variant["url"] = variant.get("durable_url")
-            for attempt in variant.get("attempts") or []:
-                attempt["url"] = attempt.get("durable_url")
-        b2_client().put_object(
-            Bucket=required("B2_BUCKET"),
-            Key=key,
-            Body=json.dumps(index, indent=2).encode(),
-            ContentType="application/json",
-        )
+        persist_b2_index(run_id)
     except Exception as exc:
         with RUN_LOCK:
             existing = RUNS[run_id].get("error")
@@ -592,6 +806,11 @@ def health():
         "qa_threshold": int(os.getenv("IDENTITY_QA_THRESHOLD", "85")),
         "max_attempts": max(1, int(os.getenv("IDENTITY_MAX_ATTEMPTS", "2"))),
     }
+
+
+class VariantDecision(BaseModel):
+    action: Literal["approve", "reject"]
+    note: str = ""
 
 
 @app.get("/api/runs")
@@ -665,18 +884,12 @@ async def create_run(
     except Exception as exc:
         raise HTTPException(503, f"Backblaze B2 ingest failed: {exc}") from exc
 
-    variants = [
-        Variant(
-            id=uuid.uuid4().hex[:10],
-            label=f"{environment} / {channel}",
-            market=market,
-            channel=channel,
-            environment=environment,
-        )
-        for market in parsed_markets
-        for channel in parsed_channels
-        for environment in parsed_environments
-    ][: int(os.getenv("MAX_VARIANTS_PER_RUN", "12"))]
+    variants = plan_variants(
+        parsed_markets,
+        parsed_channels,
+        parsed_environments,
+        int(os.getenv("MAX_VARIANTS_PER_RUN", "12")),
+    )
 
     RUNS[run_id] = {
         "run_id": run_id,
@@ -722,6 +935,78 @@ def get_run(run_id: str):
     return present_run(RUNS[run_id])
 
 
+@app.post("/api/runs/{run_id}/variants/{variant_id}/decision")
+def decide_variant(run_id: str, variant_id: str, decision: VariantDecision):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found.")
+    variant = next((item for item in run["variants"] if item["id"] == variant_id), None)
+    if not variant:
+        raise HTTPException(404, "Variant not found.")
+    if variant.get("status") not in {"ready", "flagged"}:
+        raise HTTPException(409, "Only completed variants can receive a decision.")
+    update_variant(
+        run_id,
+        variant_id,
+        approval_status="approved" if decision.action == "approve" else "rejected",
+        approval_note=decision.note.strip()[:500] or None,
+        decided_at=utc_now(),
+    )
+    try:
+        persist_b2_index(run_id)
+    except Exception as exc:
+        raise HTTPException(503, f"Decision saved locally but B2 archive update failed: {exc}") from exc
+    return present_run(RUNS[run_id])
+
+
+def regenerate_one(run_id: str, variant: Variant) -> None:
+    run = RUNS[run_id]
+    try:
+        manifests = execute_variant(
+            run_id,
+            source_b2_url(b2_client(), run["source_key"]),
+            run["product_name"],
+            run["identity_map"],
+            run["aesthetic"],
+            run["source_media_type"],
+            run["source_sha256"],
+            variant,
+            preserve_attempts=True,
+        )
+        with RUN_LOCK:
+            RUNS[run_id]["manifest_urls"] = list(dict.fromkeys((RUNS[run_id].get("manifest_urls") or []) + manifests))
+            RUNS[run_id]["status"] = "complete"
+            RUNS[run_id]["completed_at"] = utc_now()
+            persist_run(run_id)
+        persist_b2_index(run_id)
+    except Exception as exc:
+        update_variant(run_id, variant.id, status="failed", qa_notes=f"Regeneration failed: {exc}")
+        with RUN_LOCK:
+            RUNS[run_id]["status"] = "complete"
+            RUNS[run_id]["error"] = f"Single-asset regeneration failed: {exc}"
+            persist_run(run_id)
+
+
+@app.post("/api/runs/{run_id}/variants/{variant_id}/regenerate", status_code=202)
+def regenerate_variant(run_id: str, variant_id: str):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found.")
+    value = next((item for item in run["variants"] if item["id"] == variant_id), None)
+    if not value:
+        raise HTTPException(404, "Variant not found.")
+    if value.get("status") in {"queued", "generating", "reviewing"}:
+        raise HTTPException(409, "Variant is already in progress.")
+    allowed = {field.name for field in Variant.__dataclass_fields__.values()}
+    variant = Variant(**{key: val for key, val in value.items() if key in allowed})
+    with RUN_LOCK:
+        RUNS[run_id]["status"] = "running"
+        persist_run(run_id)
+    update_variant(run_id, variant_id, status="queued", approval_status="pending", approval_note=None)
+    threading.Thread(target=regenerate_one, args=(run_id, variant), daemon=True).start()
+    return present_run(RUNS[run_id])
+
+
 @app.get("/api/runs/{run_id}/export")
 def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$")):
     run = RUNS.get(run_id) or load_b2_run(run_id)
@@ -737,6 +1022,7 @@ def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$"))
     fields = [
         "run_id", "product_name", "variant_id", "market", "channel", "environment",
         "status", "score", "critical_drift", "qa_violations", "qa_notes",
+        "qa_axes", "failed_constraint_ids", "approval_status", "approval_note",
         "sha256", "durable_url", "provider",
     ]
     writer = csv.DictWriter(output, fieldnames=fields)
@@ -754,6 +1040,10 @@ def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$"))
             "critical_drift": variant.get("critical_drift", False),
             "qa_violations": " | ".join(variant.get("qa_violations") or []),
             "qa_notes": variant.get("qa_notes"),
+            "qa_axes": json.dumps(variant.get("qa_axes") or {}),
+            "failed_constraint_ids": " | ".join(variant.get("failed_constraint_ids") or []),
+            "approval_status": variant.get("approval_status", "pending"),
+            "approval_note": variant.get("approval_note"),
             "sha256": variant.get("sha256"),
             "durable_url": variant.get("durable_url"),
             "provider": variant.get("provider"),

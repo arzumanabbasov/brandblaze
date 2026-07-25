@@ -141,7 +141,11 @@ class ApiTests(unittest.TestCase):
             patch.object(main, "Pipeline", FakePipeline),
             patch.object(main, "storage_sink", return_value=object()),
             patch.object(main, "presign_output_url", return_value="https://signed.test/output.png"),
-            patch.object(main, "evaluate_variant_with_claude", return_value=(96, "Identity preserved.", False, [])),
+            patch.object(main, "evaluate_variant_with_claude", return_value={
+                "score": 96, "notes": "Identity preserved.", "critical_drift": False,
+                "violations": [], "axes": {axis: 96 for axis in main.QA_AXES},
+                "failed_constraint_ids": [], "repair_plan": {"retry_recommended": False},
+            }),
         ):
             manifest_urls = main.execute_variant(
                 run_id,
@@ -197,8 +201,18 @@ class ApiTests(unittest.TestCase):
             patch.object(main, "storage_sink", return_value=object()),
             patch.object(main, "presign_output_url", side_effect=lambda url: f"{url}?signed=1"),
             patch.object(main, "evaluate_variant_with_claude", side_effect=[
-                (40, "Handle changed.", True, ["handle geometry changed"]),
-                (70, "Pattern drift.", True, ["pattern changed"]),
+                {
+                    "score": 40, "notes": "Handle changed.", "critical_drift": True,
+                    "violations": ["handle geometry changed"], "axes": {"geometry": 40},
+                    "failed_constraint_ids": ["GEO-01"],
+                    "repair_plan": {"retry_recommended": True, "repair_instruction": "Restore handle geometry."},
+                },
+                {
+                    "score": 70, "notes": "Pattern drift.", "critical_drift": True,
+                    "violations": ["pattern changed"], "axes": {"surface": 70},
+                    "failed_constraint_ids": ["SUR-02"],
+                    "repair_plan": {"retry_recommended": False, "repair_instruction": "Restore pattern."},
+                },
             ]),
         ):
             manifests = main.execute_variant(
@@ -211,15 +225,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(saved["status"], "flagged")
         self.assertEqual(len(saved["attempts"]), 2)
         self.assertEqual(saved["attempts"][0]["outcome"], "rejected")
-        self.assertIn("Handle changed", saved["attempts"][1]["prompt"])
+        self.assertIn("base prompt", saved["attempts"][1]["prompt"])
         self.assertEqual(len(manifests), 2)
 
     def test_malformed_qa_json_preserves_asset_for_review(self):
-        score, notes, critical_drift, violations = main.parse_qa_response("not json")
-        self.assertIsNone(score)
-        self.assertIn("preserved", notes)
-        self.assertTrue(critical_drift)
-        self.assertTrue(violations)
+        qa = main.parse_qa_response("not json")
+        self.assertIsNone(qa["score"])
+        self.assertIn("preserved", qa["notes"])
+        self.assertTrue(qa["critical_drift"])
+        self.assertTrue(qa["violations"])
 
     def test_critical_identity_defect_retries_even_above_score_threshold(self):
         raw = json.dumps({
@@ -228,12 +242,12 @@ class ApiTests(unittest.TestCase):
             "violations": ["brand badge is missing"],
             "notes": "The product is close, but the required badge is absent.",
         })
-        score, notes, critical_drift, violations = main.parse_qa_response(raw)
-        self.assertEqual(score, 91)
-        self.assertTrue(critical_drift)
-        self.assertIn("brand badge is missing", violations)
-        self.assertIn("badge", notes)
-        self.assertFalse(main.identity_passes(score, 85, critical_drift))
+        qa = main.parse_qa_response(raw)
+        self.assertEqual(qa["score"], 91)
+        self.assertTrue(qa["critical_drift"])
+        self.assertIn("brand badge is missing", qa["violations"])
+        self.assertIn("badge", qa["notes"])
+        self.assertFalse(main.identity_passes(qa["score"], 85, qa["critical_drift"]))
 
     def test_upload_rejects_mismatched_file_signature(self):
         response = TestClient(main.app).post(
@@ -249,6 +263,44 @@ class ApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 415)
+
+    def test_identity_contract_has_stable_traceable_constraints(self):
+        spec = main.normalize_identity_spec(json.dumps({
+            "canonical_name": "Moto jacket",
+            "product_category": "apparel",
+            "constraints": [{
+                "id": "LOG-01", "dimension": "logo", "description": "Keep the collar badge",
+                "confidence": 0.98, "evidence": "observed", "hard": True,
+            }],
+        }))
+        self.assertEqual(spec["constraints"][0]["id"], "LOG-01")
+        self.assertIn("[LOG-01] HARD LOGO", main.format_identity_spec(spec))
+
+    def test_variant_planner_balances_requested_dimensions(self):
+        planned = main.plan_variants(
+            ["US", "JP", "FR"], ["Amazon", "Instagram"], ["Studio", "Night"], 6,
+        )
+        self.assertEqual(len(planned), 6)
+        self.assertEqual({item.market for item in planned}, {"US", "JP", "FR"})
+        self.assertEqual({item.channel for item in planned}, {"Amazon", "Instagram"})
+        self.assertEqual({item.environment for item in planned}, {"Studio", "Night"})
+
+    def test_human_decision_is_persisted_to_campaign_record(self):
+        run_id = "decision-run"
+        variant = main.Variant("v1", "Studio / Amazon", "US", "Amazon", "Studio", status="ready")
+        main.RUNS[run_id] = {
+            "run_id": run_id, "status": "complete", "source_key": "source.png",
+            "variants": [main.asdict(variant)],
+        }
+        with patch.object(main, "persist_b2_index"):
+            response = TestClient(main.app).post(
+                f"/api/runs/{run_id}/variants/v1/decision",
+                json={"action": "approve", "note": "Ready for launch"},
+            )
+        self.assertEqual(response.status_code, 200)
+        saved = main.RUNS[run_id]["variants"][0]
+        self.assertEqual(saved["approval_status"], "approved")
+        self.assertEqual(saved["approval_note"], "Ready for launch")
 
     def test_interrupted_persisted_run_is_marked_failed(self):
         path = self.runtime / "interrupted.json"

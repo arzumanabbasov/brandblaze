@@ -9,6 +9,7 @@ type Variant = {
   market: string;
   channel: string;
   environment: string;
+  objective?: string;
   status: "queued" | "generating" | "reviewing" | "ready" | "flagged" | "failed";
   url?: string;
   provider?: string;
@@ -16,6 +17,11 @@ type Variant = {
   qa_notes?: string;
   critical_drift?: boolean;
   qa_violations?: string[];
+  qa_axes?: Record<string, number>;
+  failed_constraint_ids?: string[];
+  repair_plan?: { repair_instruction?: string; retry_recommended?: boolean };
+  approval_status?: "pending" | "approved" | "rejected";
+  approval_note?: string;
   sha256?: string;
   attempts?: Attempt[];
 };
@@ -30,6 +36,10 @@ type Attempt = {
   qa_notes?: string;
   critical_drift?: boolean;
   qa_violations?: string[];
+  qa_axes?: Record<string, number>;
+  failed_constraint_ids?: string[];
+  repair_plan?: { repair_instruction?: string; retry_recommended?: boolean };
+  prompt?: string;
   outcome: "accepted" | "rejected";
 };
 
@@ -39,6 +49,7 @@ type ReactorRun = {
   variants: Variant[];
   manifest_urls?: string[];
   identity_map?: string;
+  identity_spec?: { version: number; constraints: Array<{ id: string; dimension: string; description: string; confidence: number; hard: boolean }> };
   source_url?: string;
   product_name?: string;
   created_at?: string;
@@ -225,17 +236,55 @@ export default function StudioPage() {
     }
   }
 
+  async function decideVariant(variantId: string, action: "approve" | "reject") {
+    if (!run) return;
+    const note = action === "reject" ? window.prompt("Optional rejection note for the campaign record:", "") ?? "" : "";
+    try {
+      const response = await fetch(`${API_URL}/api/runs/${run.run_id}/variants/${variantId}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, note }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const next = (await response.json()) as ReactorRun;
+      setRun(next);
+      setSelectedVariant(next.variants.find((item) => item.id === variantId) ?? null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the campaign decision.");
+    }
+  }
+
+  async function regenerateVariant(variantId: string) {
+    if (!run) return;
+    try {
+      const response = await fetch(`${API_URL}/api/runs/${run.run_id}/variants/${variantId}/regenerate`, { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+      setRun(await response.json());
+      setSelectedVariant(null);
+      setBusy(true);
+      pollRun(run.run_id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not regenerate this asset.");
+    }
+  }
+
   const shownVariants = run?.variants ?? [];
   const readyCount = run?.variants.filter((item) => item.status === "ready").length ?? 0;
   const flaggedCount = run?.variants.filter((item) => item.status === "flagged").length ?? 0;
   const queuedCount = run?.variants.filter((item) => ["queued", "generating", "reviewing"].includes(item.status)).length ?? 0;
+  const scoredVariants = shownVariants.filter((item) => item.score != null);
+  const averageScore = scoredVariants.length
+    ? Math.round(scoredVariants.reduce((sum, item) => sum + (item.score ?? 0), 0) / scoredVariants.length)
+    : 0;
+  const recoveredCount = shownVariants.filter((item) => item.status === "ready" && (item.attempts?.length ?? 0) > 1).length;
+  const approvedCount = shownVariants.filter((item) => item.approval_status === "approved").length;
   const groupedVariants = Object.entries(
     shownVariants.reduce<Record<string, Variant[]>>((groups, variant) => {
       (groups[variant.market] ??= []).push(variant);
       return groups;
     }, {}),
   );
-  const pipelineSteps = ["Ingest to B2", "Claude identity map", "GMI generation", "Claude visual QA", "Commit manifests"];
+  const pipelineSteps = ["Ingest to B2", "Identity contract", "GMI generation", "Constraint QA", "Commit manifests"];
   const stageClass = (index: number) => {
     if (!run) return "";
     if (run.status === "complete") return "done";
@@ -294,7 +343,7 @@ export default function StudioPage() {
           {setupStep === 2 && (
             <div className="setupPanel">
               <div className="panelTitle"><span>02</span><h2>Campaign matrix</h2></div>
-              <p className="stepIntro">Select only the dimensions you need. BrandBlaze creates the first 12 combinations.</p>
+              <p className="stepIntro">Select the dimensions you need. BrandBlaze balances coverage across markets, channels, and scenes.</p>
               <ChoiceGroup number="A" title="Markets" options={markets} selected={selectedMarkets} onToggle={(value) => toggle(selectedMarkets, value, setSelectedMarkets)} />
               <ChoiceGroup number="B" title="Channels" options={channels} selected={selectedChannels} onToggle={(value) => toggle(selectedChannels, value, setSelectedChannels)} />
               <ChoiceGroup number="C" title="Environments" options={environments} selected={selectedEnvironments} onToggle={(value) => toggle(selectedEnvironments, value, setSelectedEnvironments)} />
@@ -330,7 +379,7 @@ export default function StudioPage() {
               </div>
               <button className="reactButton" type="button" onClick={startReactor} disabled={busy}>
                 <span>{busy ? "Reactor running" : "Generate campaign"}</span>
-                <b>{plannedCount} variants{requestedCount > 12 ? " · first 12" : ""}</b>
+                <b>{plannedCount} variants{requestedCount > 12 ? " · balanced plan" : ""}</b>
               </button>
               <p className="pipelineNote">Your source is ingested to B2 only after you start the run.</p>
             </div>
@@ -369,9 +418,17 @@ export default function StudioPage() {
           {run?.error && <p className="runError"><b>Run notice:</b> {run.error}</p>}
           {run?.identity_map && (
             <details className="identityMap">
-              <summary>Claude identity map <span>View canonical product constraints</span></summary>
+              <summary>Machine-readable identity contract <span>{run.identity_spec?.constraints.length ?? 0} traceable constraints</span></summary>
               <pre>{run.identity_map}</pre>
             </details>
+          )}
+          {run && shownVariants.length > 0 && (
+            <div className="qualitySummary">
+              <span><b>{averageScore || "—"}%</b> average identity</span>
+              <span><b>{readyCount}/{shownVariants.length}</b> machine verified</span>
+              <span><b>{recoveredCount}</b> recovered by repair</span>
+              <span><b>{approvedCount}</b> client approved</span>
+            </div>
           )}
           {run && (
             <div className="exportBar">
@@ -416,6 +473,7 @@ export default function StudioPage() {
                         <div>
                           <h3>{variant.label}</h3>
                           <p>{variant.market} · {variant.channel}</p>
+                          {variant.objective && <p className="objective">{variant.objective}</p>}
                           {variant.qa_notes && <p className="qaNote">{variant.qa_notes}</p>}
                           {!!variant.qa_violations?.length && (
                             <ul className="violationList">
@@ -424,8 +482,11 @@ export default function StudioPage() {
                           )}
                         </div>
                         <div className="assetActions">
-                          <span>{variant.status === "ready" ? "verified" : variant.status}</span>
+                          <span>{variant.approval_status === "approved" ? "client approved" : variant.approval_status === "rejected" ? "client rejected" : variant.status === "ready" ? "machine verified" : variant.status}</span>
                           {variant.url && <button type="button" onClick={() => setSelectedVariant(variant)}>Compare</button>}
+                          {["ready", "flagged"].includes(variant.status) && variant.approval_status !== "approved" && <button type="button" onClick={() => decideVariant(variant.id, "approve")}>Approve</button>}
+                          {["ready", "flagged"].includes(variant.status) && variant.approval_status !== "rejected" && <button type="button" onClick={() => decideVariant(variant.id, "reject")}>Reject</button>}
+                          {["ready", "flagged", "failed"].includes(variant.status) && <button type="button" onClick={() => regenerateVariant(variant.id)}>Regenerate one</button>}
                         </div>
                       </div>
                     </article>
@@ -462,6 +523,35 @@ export default function StudioPage() {
                     )}
                   </div>
                   <span>{selectedVariant.attempts?.length ?? 1} attempt(s) · {selectedVariant.status === "ready" ? "verified" : selectedVariant.status}</span>
+                </div>
+                {!!selectedVariant.qa_axes && (
+                  <div className="axisGrid">
+                    {Object.entries(selectedVariant.qa_axes).map(([axis, score]) => (
+                      <span className={score < (run?.qa_threshold ?? 85) ? "axisFail" : ""} key={axis}>
+                        <b>{score}</b>{axis.replaceAll("_", " ")}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <details className="lineageInspector">
+                  <summary>Prompt and lineage inspector</summary>
+                  <dl>
+                    <div><dt>Output SHA-256</dt><dd>{selectedVariant.sha256 || "Unavailable"}</dd></div>
+                    <div><dt>Failed constraints</dt><dd>{selectedVariant.failed_constraint_ids?.join(", ") || "None"}</dd></div>
+                    <div><dt>Repair directive</dt><dd>{selectedVariant.repair_plan?.repair_instruction || "No repair required"}</dd></div>
+                  </dl>
+                  {selectedVariant.attempts?.map((attempt) => (
+                    <details key={attempt.attempt}>
+                      <summary>Attempt {attempt.attempt} · {attempt.outcome} · {attempt.score ?? "QA unavailable"}</summary>
+                      <pre>{attempt.prompt}</pre>
+                      {attempt.manifest_url && <p>Manifest: {attempt.manifest_url}</p>}
+                    </details>
+                  ))}
+                </details>
+                <div className="modalActions">
+                  <button type="button" onClick={() => decideVariant(selectedVariant.id, "approve")}>Approve asset</button>
+                  <button type="button" onClick={() => decideVariant(selectedVariant.id, "reject")}>Reject asset</button>
+                  <button type="button" onClick={() => regenerateVariant(selectedVariant.id)}>Regenerate only this asset</button>
                 </div>
                 {selectedVariant.attempts && selectedVariant.attempts.length > 1 && (
                   <div className="attemptTimeline">
