@@ -113,7 +113,7 @@ class ApiTests(unittest.TestCase):
     def test_execute_variant_commits_only_verified_real_asset(self):
         run_id = "offline-run"
         variant = main.Variant("v1", "Studio / Editorial", "France", "Editorial", "Studio")
-        main.RUNS[run_id] = {"run_id": run_id, "status": "running", "variants": [main.asdict(variant)]}
+        main.RUNS[run_id] = {"run_id": run_id, "status": "running", "source_key": "source.png", "variants": [main.asdict(variant)]}
         asset = SimpleNamespace(
             url="https://s3.us-west-004.backblazeb2.com/asset-bucket/output.png",
             sha256="abc123",
@@ -169,7 +169,7 @@ class ApiTests(unittest.TestCase):
     def test_low_identity_score_retries_then_flags(self):
         run_id = "retry-run"
         variant = main.Variant("v1", "Studio / Editorial", "France", "Editorial", "Studio")
-        main.RUNS[run_id] = {"run_id": run_id, "status": "running", "variants": [main.asdict(variant)]}
+        main.RUNS[run_id] = {"run_id": run_id, "status": "running", "source_key": "source.png", "variants": [main.asdict(variant)]}
         calls = {"pipeline": 0}
 
         class FakePipeline:
@@ -322,9 +322,14 @@ class ApiTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch.object(main, "Anthropic", return_value=client),
+            patch.object(main, "b2_image_block", return_value={
+                "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="},
+            }),
+            patch.object(main, "key_from_durable_url", return_value="output.png"),
         ):
             qa = main.evaluate_variant_with_claude(
-                "https://source", "https://output", "[GEO-01] preserve silhouette", "Editorial",
+                "source.png", "image/png", "https://durable/output.png",
+                "[GEO-01] preserve silhouette", "Editorial",
             )
         self.assertEqual(qa["score"], 92)
         self.assertFalse(qa["critical_drift"])
