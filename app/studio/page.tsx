@@ -64,7 +64,8 @@ type Health = {
 };
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
+  (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000");
 
 const markets = ["United States", "Japan", "France", "Brazil", "United Kingdom", "South Korea", "UAE", "Italy", "Germany", "India"];
 const channels = ["Instagram", "Amazon", "Billboard", "Editorial", "TikTok", "Pinterest", "E-commerce PDP", "Print campaign", "Retail display", "Email"];

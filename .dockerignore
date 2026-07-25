@@ -1,0 +1,16 @@
+.git
+.github
+.next
+.output
+.vercel
+.vinext
+.runtime
+.venv
+node_modules
+coverage
+__pycache__
+*.pyc
+*.log
+.env
+.env.*
+!.env.example

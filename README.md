@@ -272,6 +272,34 @@ Keep the backend running until all variants complete. The live asset matrix show
 
 For the first paid test, use one market, one channel, and one environment. Expand the matrix only after validating the result.
 
+## Docker deployment
+
+BrandBlaze ships as one portable container. It runs the vinext frontend, FastAPI/Genblaze backend, and an Nginx reverse proxy in a single web service:
+
+- `/` and `/studio` route to the frontend;
+- `/health` and `/api/*` route to FastAPI;
+- the public port comes from the host's `PORT` environment variable;
+- the browser uses same-origin API requests, so `NEXT_PUBLIC_API_URL` and production CORS configuration are unnecessary.
+
+Build and run locally:
+
+```powershell
+docker build -t brandblaze .
+docker run --rm -p 10000:10000 --env-file .env -e PORT=10000 brandblaze
+```
+
+Open `http://localhost:10000` and confirm `http://localhost:10000/health` returns JSON.
+
+### Deploy the complete application on Render
+
+1. In Render, choose **New → Blueprint**.
+2. Connect the BrandBlaze GitHub repository.
+3. Render detects `render.yaml` and creates one Docker web service.
+4. Enter each secret marked `sync: false`.
+5. Deploy, then open the generated `onrender.com` URL.
+
+The free Render service is suitable for a hackathon demo but sleeps after inactivity and has an ephemeral filesystem. Generated media and manifests remain durable in Backblaze B2; local run-index files can disappear when the container restarts. Use a paid persistent service for production.
+
 ## API
 
 ### Health
