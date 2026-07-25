@@ -510,9 +510,8 @@ QA_AXES = (
 )
 
 
-def parse_qa_response(raw: str) -> dict[str, Any]:
+def normalize_qa_result(result: dict[str, Any]) -> dict[str, Any]:
     try:
-        result = parse_json_object(raw)
         score = max(0, min(100, int(result["score"])))
         axes = {
             axis: max(0, min(100, int((result.get("axes") or {}).get(axis, score))))
@@ -543,7 +542,7 @@ def parse_qa_response(raw: str) -> dict[str, Any]:
                 "retry_recommended": bool(repair.get("retry_recommended", True)),
             },
         }
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return {
             "score": None,
             "notes": "Claude QA returned an unreadable score; the generated asset was preserved for review.",
@@ -553,6 +552,13 @@ def parse_qa_response(raw: str) -> dict[str, Any]:
             "failed_constraint_ids": [],
             "repair_plan": {"severity": "unknown", "retry_recommended": False, "repair_instruction": "Human review required."},
         }
+
+
+def parse_qa_response(raw: str) -> dict[str, Any]:
+    try:
+        return normalize_qa_result(parse_json_object(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return normalize_qa_result({})
 
 
 def identity_passes(score: int | None, threshold: int, critical_drift: bool) -> bool:
@@ -567,7 +573,7 @@ def evaluate_variant_with_claude(
 ) -> dict[str, Any]:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        max_tokens=800,
+        max_tokens=1400,
         temperature=0,
         system=(
             "You are a strict product-continuity inspector. Compare the source product in image one "
@@ -577,14 +583,40 @@ def evaluate_variant_with_claude(
             "construction. Set critical_drift=true when any named logo or marking is missing or altered, "
             "the primary color or material changes, a distinctive component is missing or added, or core "
             "geometry changes. A critical defect cannot be compensated for by overall visual similarity. "
-            "Return valid JSON only: {\"score\":0,\"critical_drift\":false,"
-            "\"axes\":{\"geometry\":0,\"component_count\":0,\"color\":0,\"material\":0,"
-            "\"logo_markings\":0,\"text_integrity\":0,\"product_prominence\":0,\"channel_fit\":0},"
-            "\"failed_constraint_ids\":[],\"violations\":[],\"notes\":\"\","
-            "\"repair_plan\":{\"severity\":\"minor|moderate|critical\",\"protected_constraints\":[],"
-            "\"preserved_creative_elements\":[],\"repair_instruction\":\"specific edit instruction\","
-            "\"retry_recommended\":true}}."
+            "Call the provided QA tool exactly once. Never print the result as prose or JSON text."
         ),
+        tools=[{
+            "name": "record_visual_qa",
+            "description": "Record constraint-level product continuity and channel QA.",
+            "input_schema": {
+                "type": "object",
+                "required": ["score", "critical_drift", "axes", "failed_constraint_ids", "violations", "notes", "repair_plan"],
+                "properties": {
+                    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "critical_drift": {"type": "boolean"},
+                    "axes": {
+                        "type": "object",
+                        "required": list(QA_AXES),
+                        "properties": {axis: {"type": "integer", "minimum": 0, "maximum": 100} for axis in QA_AXES},
+                    },
+                    "failed_constraint_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+                    "violations": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                    "notes": {"type": "string"},
+                    "repair_plan": {
+                        "type": "object",
+                        "required": ["severity", "protected_constraints", "preserved_creative_elements", "repair_instruction", "retry_recommended"],
+                        "properties": {
+                            "severity": {"type": "string", "enum": ["minor", "moderate", "critical"]},
+                            "protected_constraints": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+                            "preserved_creative_elements": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                            "repair_instruction": {"type": "string"},
+                            "retry_recommended": {"type": "boolean"},
+                        },
+                    },
+                },
+            },
+        }],
+        tool_choice={"type": "tool", "name": "record_visual_qa"},
         messages=[{
             "role": "user",
             "content": [
@@ -601,7 +633,17 @@ def evaluate_variant_with_claude(
             ],
         }],
     )
-    return parse_qa_response(claude_text(response))
+    tool_input = next(
+        (
+            block.input for block in response.content
+            if getattr(block, "type", "") == "tool_use"
+            and getattr(block, "name", "") == "record_visual_qa"
+        ),
+        None,
+    )
+    if not isinstance(tool_input, dict):
+        raise RuntimeError("Claude returned no structured visual QA record.")
+    return normalize_qa_result(tool_input)
 
 
 def update_variant(run_id: str, variant_id: str, **changes: Any) -> None:
