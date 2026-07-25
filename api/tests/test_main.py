@@ -141,7 +141,7 @@ class ApiTests(unittest.TestCase):
             patch.object(main, "Pipeline", FakePipeline),
             patch.object(main, "storage_sink", return_value=object()),
             patch.object(main, "presign_output_url", return_value="https://signed.test/output.png"),
-            patch.object(main, "evaluate_variant_with_claude", return_value=(96, "Identity preserved.")),
+            patch.object(main, "evaluate_variant_with_claude", return_value=(96, "Identity preserved.", False, [])),
         ):
             manifest_urls = main.execute_variant(
                 run_id,
@@ -196,7 +196,10 @@ class ApiTests(unittest.TestCase):
             patch.object(main, "Pipeline", FakePipeline),
             patch.object(main, "storage_sink", return_value=object()),
             patch.object(main, "presign_output_url", side_effect=lambda url: f"{url}?signed=1"),
-            patch.object(main, "evaluate_variant_with_claude", side_effect=[(40, "Handle changed."), (70, "Pattern drift.")]),
+            patch.object(main, "evaluate_variant_with_claude", side_effect=[
+                (40, "Handle changed.", True, ["handle geometry changed"]),
+                (70, "Pattern drift.", True, ["pattern changed"]),
+            ]),
         ):
             manifests = main.execute_variant(
                 run_id, "https://source", "Tea set", "identity", "Quiet luxury",
@@ -212,9 +215,25 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(manifests), 2)
 
     def test_malformed_qa_json_preserves_asset_for_review(self):
-        score, notes = main.parse_qa_response("not json")
+        score, notes, critical_drift, violations = main.parse_qa_response("not json")
         self.assertIsNone(score)
         self.assertIn("preserved", notes)
+        self.assertTrue(critical_drift)
+        self.assertTrue(violations)
+
+    def test_critical_identity_defect_retries_even_above_score_threshold(self):
+        raw = json.dumps({
+            "score": 91,
+            "critical_drift": True,
+            "violations": ["brand badge is missing"],
+            "notes": "The product is close, but the required badge is absent.",
+        })
+        score, notes, critical_drift, violations = main.parse_qa_response(raw)
+        self.assertEqual(score, 91)
+        self.assertTrue(critical_drift)
+        self.assertIn("brand badge is missing", violations)
+        self.assertIn("badge", notes)
+        self.assertFalse(main.identity_passes(score, 85, critical_drift))
 
     def test_upload_rejects_mismatched_file_signature(self):
         response = TestClient(main.app).post(
