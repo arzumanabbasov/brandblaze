@@ -49,6 +49,8 @@ class Variant:
     provider: str | None = None
     score: int | None = None
     qa_notes: str | None = None
+    critical_drift: bool = False
+    qa_violations: list[str] | None = None
     sha256: str | None = None
     attempts: list[dict[str, Any]] | None = None
 
@@ -278,7 +280,10 @@ def direct_variant_with_claude(
             "product must remain geometrically and materially faithful. Translate market context through "
             "light, space, color, props, and composition—never stereotypes, flags, tourist symbols, or "
             "written text. Specify lens, camera height, framing, lighting, palette, surface, depth, "
-            "atmosphere, and product placement. Make it authored, tactile, expensive, and editorial—not "
+            "atmosphere, and product placement. Keep the complete product unobstructed, uncropped, "
+            "tack-sharp, and visually dominant at 65-80% of frame height. Preserve every named logo, "
+            "label, closure, pocket, hardware element, seam, and distinctive component exactly. "
+            "Make it authored, tactile, expensive, and editorial—not "
             "generic AI art. Output only the final 180–260 word image prompt. Put identity constraints "
             "first and negative constraints last."
         ),
@@ -303,35 +308,61 @@ def direct_variant_with_claude(
     return prompt
 
 
-def parse_qa_response(raw: str) -> tuple[int | None, str]:
+def parse_qa_response(raw: str) -> tuple[int | None, str, bool, list[str]]:
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
         result = json.loads(raw)
         score = max(0, min(100, int(result["score"])))
-        return score, str(result.get("notes") or "No QA notes returned.")[:500]
+        violations = [
+            str(item)[:180]
+            for item in result.get("violations", [])
+            if isinstance(item, str) and item.strip()
+        ][:8]
+        return (
+            score,
+            str(result.get("notes") or "No QA notes returned.")[:500],
+            bool(result.get("critical_drift", False)),
+            violations,
+        )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return None, "Claude QA returned an unreadable score; the generated asset was preserved for review."
+        return None, "Claude QA returned an unreadable score; the generated asset was preserved for review.", True, ["QA result was unreadable"]
 
 
-def evaluate_variant_with_claude(source_url: str, output_url: str) -> tuple[int | None, str]:
+def identity_passes(score: int | None, threshold: int, critical_drift: bool) -> bool:
+    return score is not None and score >= threshold and not critical_drift
+
+
+def evaluate_variant_with_claude(
+    source_url: str,
+    output_url: str,
+    identity_map: str,
+) -> tuple[int | None, str, bool, list[str]]:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
         max_tokens=300,
         temperature=0,
         system=(
             "You are a strict product-continuity inspector. Compare the source product in image one "
-            "with the generated product in image two. Ignore background, lighting, camera angle, and "
-            "props. Score only product geometry, colors, materials, patterns, logos, and component count. "
-            "Return valid JSON only: {\"score\": integer 0-100, \"notes\": \"one concise sentence\"}."
+            "with the generated product in image two, using the canonical identity lock as the binding "
+            "specification. Ignore background, lighting, camera angle, and props. Inspect geometry, color, "
+            "material, surface, pattern, logo/label fidelity, hardware, component count, and distinctive "
+            "construction. Set critical_drift=true when any named logo or marking is missing or altered, "
+            "the primary color or material changes, a distinctive component is missing or added, or core "
+            "geometry changes. A critical defect cannot be compensated for by overall visual similarity. "
+            "Return valid JSON only: {\"score\": integer 0-100, \"critical_drift\": boolean, "
+            "\"violations\": [\"short defect\"], \"notes\": \"one concise sentence\"}."
         ),
         messages=[{
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "url", "url": source_url}},
                 {"type": "image", "source": {"type": "url", "url": output_url}},
-                {"type": "text", "text": "Evaluate product identity preservation."},
+                {
+                    "type": "text",
+                    "text": f"Evaluate product identity preservation.\n\nCANONICAL IDENTITY LOCK:\n{identity_map}",
+                },
             ],
         }],
     )
@@ -417,10 +448,19 @@ def execute_variant(
             manifests.append(manifest_url)
         display_url = presign_output_url(asset.url)
         try:
-            score, qa_notes = evaluate_variant_with_claude(source_url, display_url)
+            score, qa_notes, critical_drift, qa_violations = evaluate_variant_with_claude(
+                source_url,
+                display_url,
+                identity_map,
+            )
         except Exception as exc:
-            score, qa_notes = None, f"Claude QA was unavailable: {exc}"
-        accepted = score is not None and score >= threshold
+            score, qa_notes, critical_drift, qa_violations = (
+                None,
+                f"Claude QA was unavailable: {exc}",
+                True,
+                ["QA service was unavailable"],
+            )
+        accepted = identity_passes(score, threshold, critical_drift)
         append_attempt(run_id, variant.id, {
             "attempt": attempt_number,
             "url": display_url,
@@ -430,6 +470,8 @@ def execute_variant(
             "prompt": prompt,
             "score": score,
             "qa_notes": qa_notes,
+            "critical_drift": critical_drift,
+            "qa_violations": qa_violations,
             "outcome": "accepted" if accepted else "rejected",
         })
         update_variant(
@@ -441,6 +483,8 @@ def execute_variant(
             provider=provider_label,
             score=score,
             qa_notes=qa_notes,
+            critical_drift=critical_drift,
+            qa_violations=qa_violations,
             sha256=asset.sha256,
         )
         if accepted:
@@ -692,7 +736,8 @@ def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$"))
     output = io.StringIO()
     fields = [
         "run_id", "product_name", "variant_id", "market", "channel", "environment",
-        "status", "score", "qa_notes", "sha256", "durable_url", "provider",
+        "status", "score", "critical_drift", "qa_violations", "qa_notes",
+        "sha256", "durable_url", "provider",
     ]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
@@ -706,6 +751,8 @@ def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$"))
             "environment": variant.get("environment"),
             "status": variant.get("status"),
             "score": variant.get("score"),
+            "critical_drift": variant.get("critical_drift", False),
+            "qa_violations": " | ".join(variant.get("qa_violations") or []),
             "qa_notes": variant.get("qa_notes"),
             "sha256": variant.get("sha256"),
             "durable_url": variant.get("durable_url"),

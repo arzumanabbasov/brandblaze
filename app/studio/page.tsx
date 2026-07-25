@@ -14,6 +14,8 @@ type Variant = {
   provider?: string;
   score?: number;
   qa_notes?: string;
+  critical_drift?: boolean;
+  qa_violations?: string[];
   sha256?: string;
   attempts?: Attempt[];
 };
@@ -26,6 +28,8 @@ type Attempt = {
   manifest_url?: string;
   score?: number;
   qa_notes?: string;
+  critical_drift?: boolean;
+  qa_violations?: string[];
   outcome: "accepted" | "rejected";
 };
 
@@ -343,7 +347,11 @@ export default function StudioPage() {
           <div className="reactorHeader">
             <div>
               <span className="sectionKicker">LIVE ASSET MATRIX</span>
-              <h2>{run ? productName : "Untitled product"} / Global expansion</h2>
+              <h2>
+                {run ? productName : "Untitled product"} / {selectedMarkets.length === 1
+                  ? selectedMarkets[0]
+                  : `${selectedMarkets.length} market campaign`}
+              </h2>
             </div>
             <div className="runStats">
               <span><b>{queuedCount}</b> in progress</span>
@@ -395,7 +403,13 @@ export default function StudioPage() {
                           // eslint-disable-next-line @next/next/no-img-element
                           <img className="pendingReference" src={preview} alt="Source image awaiting generation" />
                         ) : <span className="awaitingAsset">Awaiting<br />generation</span>}
-                        <span className="score">{variant.score != null ? `${variant.score}% identity` : variant.status === "failed" ? "generation failed" : variant.status}</span>
+                        <span className="score">
+                          {variant.critical_drift
+                            ? "critical drift"
+                            : variant.score != null
+                              ? `${variant.score}% identity`
+                              : variant.status === "failed" ? "generation failed" : variant.status}
+                        </span>
                         {(variant.attempts?.length ?? 0) > 1 && <span className="retryBadge">{variant.attempts?.length} attempts</span>}
                       </button>
                       <div className="assetInfo">
@@ -403,9 +417,14 @@ export default function StudioPage() {
                           <h3>{variant.label}</h3>
                           <p>{variant.market} · {variant.channel}</p>
                           {variant.qa_notes && <p className="qaNote">{variant.qa_notes}</p>}
+                          {!!variant.qa_violations?.length && (
+                            <ul className="violationList">
+                              {variant.qa_violations.map((violation) => <li key={violation}>{violation}</li>)}
+                            </ul>
+                          )}
                         </div>
                         <div className="assetActions">
-                          <span>{variant.status}</span>
+                          <span>{variant.status === "ready" ? "verified" : variant.status}</span>
                           {variant.url && <button type="button" onClick={() => setSelectedVariant(variant)}>Compare</button>}
                         </div>
                       </div>
@@ -434,7 +453,16 @@ export default function StudioPage() {
                     <figcaption>Generated output</figcaption>
                   </figure>
                 </div>
-                <div className="qaPanel"><b>{selectedVariant.score ?? "—"}% identity</b><p>{selectedVariant.qa_notes}</p><span>{selectedVariant.attempts?.length ?? 1} attempt(s) · {selectedVariant.status}</span></div>
+                <div className={`qaPanel ${selectedVariant.critical_drift ? "critical" : ""}`}>
+                  <b>{selectedVariant.score ?? "—"}% identity</b>
+                  <div>
+                    <p>{selectedVariant.qa_notes}</p>
+                    {!!selectedVariant.qa_violations?.length && (
+                      <ul>{selectedVariant.qa_violations.map((violation) => <li key={violation}>{violation}</li>)}</ul>
+                    )}
+                  </div>
+                  <span>{selectedVariant.attempts?.length ?? 1} attempt(s) · {selectedVariant.status === "ready" ? "verified" : selectedVariant.status}</span>
+                </div>
                 {selectedVariant.attempts && selectedVariant.attempts.length > 1 && (
                   <div className="attemptTimeline">
                     {selectedVariant.attempts.map((attempt) => <span className={attempt.outcome} key={attempt.attempt}>Attempt {attempt.attempt}: {attempt.score ?? "QA unavailable"} · {attempt.outcome}</span>)}
