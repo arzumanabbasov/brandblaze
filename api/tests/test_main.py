@@ -298,6 +298,38 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(spec["canonical_name"], "BLJ")
         self.assertEqual(spec["constraints"][0]["id"], "GEO-01")
 
+    def test_visual_qa_uses_schema_tool_output_instead_of_text_json(self):
+        tool_input = {
+            "score": 92,
+            "critical_drift": False,
+            "axes": {axis: 92 for axis in main.QA_AXES},
+            "failed_constraint_ids": [],
+            "violations": [],
+            "notes": "Identity and channel requirements are preserved.",
+            "repair_plan": {
+                "severity": "minor",
+                "protected_constraints": ["GEO-01"],
+                "preserved_creative_elements": ["Rome winter lighting"],
+                "repair_instruction": "No repair required.",
+                "retry_recommended": False,
+            },
+        }
+        response = SimpleNamespace(content=[
+            SimpleNamespace(type="text", text='{"broken": "unterminated'),
+            SimpleNamespace(type="tool_use", name="record_visual_qa", input=tool_input),
+        ])
+        client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: response))
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+            patch.object(main, "Anthropic", return_value=client),
+        ):
+            qa = main.evaluate_variant_with_claude(
+                "https://source", "https://output", "[GEO-01] preserve silhouette", "Editorial",
+            )
+        self.assertEqual(qa["score"], 92)
+        self.assertFalse(qa["critical_drift"])
+        self.assertEqual(qa["axes"]["geometry"], 92)
+
     def test_variant_planner_balances_requested_dimensions(self):
         planned = main.plan_variants(
             ["US", "JP", "FR"], ["Amazon", "Instagram"], ["Studio", "Night"], 6,
