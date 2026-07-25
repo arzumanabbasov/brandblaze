@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: brandblaze
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APP_KEY
+        sync: false
+      - key: B2_REGION
+        value: us-west-004
+      - key: B2_PUBLIC_BASE_URL
+        sync: false
+      - key: B2_BUCKET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GMI_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        value: claude-sonnet-4-6
+      - key: GMI_IMAGE_MODEL
+        value: seedream-5.0-lite
+      - key: GMI_IMAGE_SIZE
+        value: 2048x2048
+      - key: GMI_OUTPUT_FORMAT
+        value: png
+      - key: GENBLAZE_CONCURRENCY
+        value: "3"
+      - key: GENBLAZE_TIMEOUT
+        value: "300"
+      - key: MAX_VARIANTS_PER_RUN
+        value: "12"
+      - key: IDENTITY_QA_THRESHOLD
+        value: "85"
+      - key: IDENTITY_MAX_ATTEMPTS
+        value: "2"
