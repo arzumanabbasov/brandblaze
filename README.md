@@ -2,7 +2,7 @@
 
 **One product photograph in. An identity-consistent campaign library out.**
 
-BrandBlaze transforms a single reference photograph into market-, channel-, and environment-specific product imagery without intentionally redesigning the product. Claude analyzes the reference and creates a canonical identity lock, Genblaze orchestrates GMI Cloud image editing, and Backblaze B2 stores the source, generated assets, manifests, hashes, and run index.
+BrandBlaze is visual CI/CD for product campaigns. It transforms a single reference photograph into market-, channel-, and environment-specific imagery, tests every output against a machine-readable identity contract, repairs failed constraints, and preserves the complete decision record. Claude provides visual analysis and direction, Genblaze orchestrates GMI Cloud image editing, and Backblaze B2 stores the source, generated assets, manifests, hashes, approvals, and run index.
 
 The project was built for the **Backblaze Generative Media Hackathon: Build with Genblaze on B2**.
 
@@ -23,16 +23,17 @@ BrandBlaze treats the product as an invariant and the campaign world as a variab
 1. Accepts a PNG, JPG, or WEBP reference image.
 2. Uploads the original source specimen to Backblaze B2.
 3. Gives Claude vision the source image and the user's identity notes.
-4. Produces a canonical identity map describing what must never change.
+4. Produces a versioned identity contract with stable constraint IDs, confidence, evidence, and hard/soft requirements.
 5. Creates a specific commercial-art-direction prompt for every requested combination.
 6. Sends the reference image and prompt to GMI Cloud through a Genblaze pipeline.
 7. Stores each generated image and its provenance manifest in B2.
 8. Verifies the Genblaze manifest before accepting the output.
 9. Uses Claude vision again to compare the generated product with the source.
-10. Automatically retries a low-scoring result once with Claude's QA correction.
+10. Scores geometry, component count, color, material, markings, text, prominence, and channel fitness independently.
+11. Automatically retries a failed result with a targeted repair contract that preserves successful creative elements.
 11. Flags a second low-scoring attempt instead of presenting it as verified.
-12. Preserves every attempt, prompt, hash, manifest, score, and outcome in B2 lineage.
-13. Displays the identity score, QA notes, provider, market, channel, environment, and B2-backed image.
+12. Preserves every attempt, prompt, hash, manifest, score, constraint failure, repair, and approval in B2 lineage.
+13. Lets an operator approve, reject, or regenerate one asset without rerunning the campaign.
 
 The UI currently supports preset and custom:
 
@@ -41,7 +42,7 @@ The UI currently supports preset and custom:
 - environments;
 - art directions.
 
-Each run is capped at 12 variants to control cost and execution time.
+Each run is capped at 12 variants to control cost and execution time. When more combinations are requested, a deterministic coverage planner balances markets, channels, environments, and pair coverage instead of taking the first 12 Cartesian combinations.
 
 ## Why Backblaze B2 matters
 
@@ -100,9 +101,9 @@ brandblaze/sources/<run-id>/original.<extension>
 
 For private buckets, the backend creates a short-lived presigned URL so Claude and GMI can read the source without making the bucket public.
 
-### 2. Claude identity map
+### 2. Claude identity contract
 
-Claude inspects the image and separates immutable product identity from mutable campaign direction. The identity map covers:
+Claude inspects the image and separates immutable product identity from mutable campaign direction. The structured contract assigns stable IDs and confidence to observable constraints covering:
 
 - immutable geometry;
 - material and surface properties;
@@ -133,11 +134,11 @@ Genblaze stores generated assets through its B2-compatible S3 sink. A variant is
 
 ### 6. Claude visual QA
 
-Claude receives the original and generated images and scores only product identity preservation. Background, props, lighting, and camera angle are intentionally ignored. The resulting score and concise QA note are shown in the interface.
+Claude receives the original and generated images and evaluates eight explicit axes: geometry, component count, color, material, logo/markings, text integrity, product prominence, and channel fit. Named hard-constraint failures override the aggregate score.
 
 The score is an enforcement gate, not decoration. By default, results below
-`IDENTITY_QA_THRESHOLD=85` are rejected and regenerated once with the first
-attempt's QA note injected as a corrective constraint. If the final attempt is
+`IDENTITY_QA_THRESHOLD=85` are rejected and regenerated once with a structured
+repair contract containing failed constraint IDs, protected constraints, and creative elements to preserve. If the final attempt is
 still below threshold—or QA cannot produce a readable score—the variant is
 preserved but marked `flagged`, never `ready`.
 

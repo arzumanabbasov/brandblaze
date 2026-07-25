@@ -128,6 +128,10 @@ h1 em { font-family:Georgia,serif; font-weight:400; }
 .exportBar span { margin-right:auto; color:var(--muted); }
 .exportBar a { color:inherit; text-decoration:none; border:1px solid var(--line); padding:7px 9px; }
 .exportBar a:hover { background:var(--ink); color:white; }
+.qualitySummary { display:grid; grid-template-columns:repeat(4,1fr); margin:0 0 20px; border:1px solid var(--line); }
+.qualitySummary span { padding:12px; border-right:1px solid var(--line); color:var(--muted); font:8px var(--font-geist-mono),monospace; text-transform:uppercase; }
+.qualitySummary span:last-child { border-right:0; }
+.qualitySummary b { display:block; margin-bottom:3px; color:var(--ink); font:19px Arial,sans-serif; }
 .reactor { padding:28px 3.2vw 34px 28px; min-width:0; }
 .reactorHeader { display:flex; justify-content:space-between; align-items:end; margin-bottom:24px; }
 .reactorHeader h2 { margin:0; font-size:25px; letter-spacing:-.035em; }
@@ -188,6 +192,7 @@ h1 em { font-family:Georgia,serif; font-weight:400; }
 .assetActions { flex:0 0 auto; display:flex; flex-direction:column; align-items:flex-end; gap:7px; }
 .assetActions span,.assetActions a,.assetActions button { background:transparent; font:7px var(--font-geist-mono),monospace; border:1px solid var(--line); padding:4px; text-transform:uppercase; color:inherit; text-decoration:none; cursor:pointer; }
 .assetActions a:hover,.assetActions button:hover { background:var(--ink); color:white; }
+.objective { color:var(--muted); font-style:italic; }
 .modalBackdrop { position:fixed; inset:0; z-index:50; background:rgba(10,11,9,.72); display:grid; place-items:center; padding:24px; }
 .compareModal { width:min(1040px,96vw); max-height:92vh; overflow:auto; background:var(--paper); padding:22px; box-shadow:0 24px 80px rgba(0,0,0,.4); }
 .compareModal header,.archiveDrawer header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px; }
@@ -205,6 +210,20 @@ h1 em { font-family:Georgia,serif; font-weight:400; }
 .qaPanel b { font:22px Arial,sans-serif; }
 .qaPanel p { margin:0; font-size:11px; }
 .qaPanel span { font:8px var(--font-geist-mono),monospace; text-transform:uppercase; }
+.axisGrid { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; margin-top:10px; background:var(--line); border:1px solid var(--line); }
+.axisGrid span { padding:10px; background:var(--paper); font:8px var(--font-geist-mono),monospace; text-transform:uppercase; }
+.axisGrid b { display:block; margin-bottom:3px; font:18px Arial,sans-serif; }
+.axisGrid .axisFail { background:#ead8d2; color:#9e2f20; }
+.lineageInspector { margin-top:10px; border:1px solid var(--line); padding:12px; font-size:10px; }
+.lineageInspector>summary { cursor:pointer; font:9px var(--font-geist-mono),monospace; text-transform:uppercase; }
+.lineageInspector dl div { display:grid; grid-template-columns:140px 1fr; gap:10px; border-top:1px solid var(--line); padding:7px 0; }
+.lineageInspector dt { color:var(--muted); text-transform:uppercase; }
+.lineageInspector dd { margin:0; overflow-wrap:anywhere; }
+.lineageInspector details { margin-top:8px; padding:8px; background:#e8e6dd; }
+.lineageInspector pre { white-space:pre-wrap; max-height:180px; overflow:auto; }
+.modalActions { display:flex; gap:8px; margin-top:10px; }
+.modalActions button { border:1px solid var(--line); background:transparent; padding:9px 12px; cursor:pointer; text-transform:uppercase; font:8px var(--font-geist-mono),monospace; }
+.modalActions button:hover { background:var(--ink); color:white; }
 .attemptTimeline { display:flex; gap:7px; flex-wrap:wrap; margin-top:10px; }
 .attemptTimeline span { padding:6px 8px; font:8px var(--font-geist-mono),monospace; border:1px solid var(--line); text-transform:uppercase; }
 .attemptTimeline .accepted { background:#dfe9d5; }
@@ -222,5 +241,5 @@ h1 em { font-family:Georgia,serif; font-weight:400; }
 .vaultBar small { display:block; color:var(--muted); font-size:9px; margin-top:3px; }
 .hash { font:9px var(--font-geist-mono),monospace; color:var(--muted); }
 @media (max-width:1000px) { .workspace { grid-template-columns:290px 1fr; } .assetGrid { grid-template-columns:repeat(2,1fr); } .navMeta { display:none; } .workflowCards { grid-template-columns:repeat(2,1fr); } .workflowCards article:nth-child(2) { border-right:0; } }
-@media (max-width:720px) { .landingLinks>a:not(.landingNavCta) { display:none; } .landingHero { min-height:calc(100vh - 82px); padding-top:70px; } .landingHero h1 { font-size:62px; } .landingHero>p:not(.eyebrow),.landingActions { margin-left:0; } .landingSignal { flex-wrap:wrap; } .landingProblem,.landingWorkflow header,.landingProof { grid-template-columns:1fr; } .workflowCards { grid-template-columns:1fr; } .workflowCards article { min-height:230px; border-right:0; border-bottom:1px solid var(--line); } .workflowCards h3 { margin-top:40px; } .studioHeader { align-items:flex-start; flex-direction:column; gap:20px; } .hero { grid-template-columns:1fr; } .workspace { grid-template-columns:1fr; } .controlPanel { border-right:0; border-bottom:1px solid var(--line); padding:24px; } .reactor { padding:24px; } .pipeline { grid-template-columns:1fr; } .runStats { display:none; } .assetGrid { grid-template-columns:repeat(2,minmax(0,1fr)); } .nav { padding:0 20px; } h1 { font-size:49px; } .compareGrid { grid-template-columns:1fr; } .compareGrid img { height:38vh; } .qaPanel { grid-template-columns:1fr; } }
+@media (max-width:720px) { .landingLinks>a:not(.landingNavCta) { display:none; } .landingHero { min-height:calc(100vh - 82px); padding-top:70px; } .landingHero h1 { font-size:62px; } .landingHero>p:not(.eyebrow),.landingActions { margin-left:0; } .landingSignal { flex-wrap:wrap; } .landingProblem,.landingWorkflow header,.landingProof { grid-template-columns:1fr; } .workflowCards { grid-template-columns:1fr; } .workflowCards article { min-height:230px; border-right:0; border-bottom:1px solid var(--line); } .workflowCards h3 { margin-top:40px; } .studioHeader { align-items:flex-start; flex-direction:column; gap:20px; } .hero { grid-template-columns:1fr; } .workspace { grid-template-columns:1fr; } .controlPanel { border-right:0; border-bottom:1px solid var(--line); padding:24px; } .reactor { padding:24px; } .pipeline { grid-template-columns:1fr; } .runStats { display:none; } .qualitySummary,.axisGrid { grid-template-columns:repeat(2,1fr); } .assetGrid { grid-template-columns:repeat(2,minmax(0,1fr)); } .nav { padding:0 20px; } h1 { font-size:49px; } .compareGrid { grid-template-columns:1fr; } .compareGrid img { height:38vh; } .qaPanel { grid-template-columns:1fr; } }
 @media (max-width:430px) { .assetGrid { grid-template-columns:1fr; } .hero { padding:42px 20px 32px; } .reactorHeader h2 { font-size:20px; } }
