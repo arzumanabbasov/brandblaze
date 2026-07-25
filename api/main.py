@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import base64
 import csv
 import io
 import os
@@ -247,6 +248,23 @@ def presign_output_url(durable_url: str) -> str:
         Params={"Bucket": required("B2_BUCKET"), "Key": key_from_durable_url(durable_url)},
         ExpiresIn=int(os.getenv("B2_OUTPUT_URL_TTL", "3600")),
     )
+
+
+def b2_image_block(key: str, media_type: str | None = None) -> dict[str, Any]:
+    response = b2_client().get_object(Bucket=required("B2_BUCKET"), Key=key)
+    payload = response["Body"].read()
+    detected = detected_media_type(payload)
+    resolved_type = detected or media_type
+    if resolved_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise RuntimeError("B2 object is not a supported product image.")
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": resolved_type,
+            "data": base64.b64encode(payload).decode("ascii"),
+        },
+    }
 
 
 def present_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -566,11 +584,14 @@ def identity_passes(score: int | None, threshold: int, critical_drift: bool) -> 
 
 
 def evaluate_variant_with_claude(
-    source_url: str,
-    output_url: str,
+    source_key: str,
+    source_media_type: str,
+    output_durable_url: str,
     identity_map: str,
     channel: str,
 ) -> dict[str, Any]:
+    source_image = b2_image_block(source_key, source_media_type)
+    output_image = b2_image_block(key_from_durable_url(output_durable_url))
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
         max_tokens=1400,
@@ -620,8 +641,8 @@ def evaluate_variant_with_claude(
         messages=[{
             "role": "user",
             "content": [
-                {"type": "image", "source": {"type": "url", "url": source_url}},
-                {"type": "image", "source": {"type": "url", "url": output_url}},
+                source_image,
+                output_image,
                 {
                     "type": "text",
                     "text": (
@@ -745,8 +766,9 @@ def execute_variant(
         display_url = presign_output_url(asset.url)
         try:
             qa = evaluate_variant_with_claude(
-                source_url,
-                display_url,
+                RUNS[run_id]["source_key"],
+                source_media_type,
+                asset.url,
                 identity_map,
                 variant.channel,
             )
