@@ -380,21 +380,57 @@ def format_identity_spec(spec: dict[str, Any]) -> str:
 def analyze_product_with_claude(source_url: str, product_name: str, user_brief: str) -> dict[str, Any]:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        max_tokens=1400,
+        max_tokens=2200,
         temperature=0.2,
         system=(
             "You are the visual continuity director for a world-class product photography studio. "
             "Inspect the reference with forensic care and produce a machine-readable product contract. "
             "Separate immutable identity from mutable art direction. Never invent occluded details. "
-            "Return valid JSON only with this schema: "
-            "{\"canonical_name\":\"\", \"product_category\":\"\", \"constraints\":["
-            "{\"id\":\"GEO-01\",\"dimension\":\"geometry|component_count|color|material|logo|text|hardware|surface\","
-            "\"description\":\"observable requirement\",\"confidence\":0.0,\"evidence\":\"observed|owner_provided|inferred\","
-            "\"hard\":true}],\"camera_evidence\":{\"visible_faces\":[],\"occluded_details\":[],"
-            "\"view_limitations\":[]},\"unknown_or_ambiguous_details\":[]}. "
-            "Use stable unique constraint IDs. Treat visible or owner-specified logos, text, component "
-            "count, geometry, color, material, and distinctive hardware as hard constraints."
+            "Call the provided tool exactly once. Use no more than 16 concise constraints. Use stable "
+            "unique constraint IDs. Treat visible or owner-specified logos, text, component count, "
+            "geometry, color, material, and distinctive hardware as hard constraints."
         ),
+        tools=[{
+            "name": "record_identity_contract",
+            "description": "Record the canonical, machine-readable product identity contract.",
+            "input_schema": {
+                "type": "object",
+                "required": ["canonical_name", "product_category", "constraints"],
+                "properties": {
+                    "canonical_name": {"type": "string"},
+                    "product_category": {"type": "string"},
+                    "constraints": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "dimension", "description", "confidence", "evidence", "hard"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "dimension": {
+                                    "type": "string",
+                                    "enum": ["geometry", "component_count", "color", "material", "logo", "text", "hardware", "surface"],
+                                },
+                                "description": {"type": "string"},
+                                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                                "evidence": {"type": "string", "enum": ["observed", "owner_provided", "inferred"]},
+                                "hard": {"type": "boolean"},
+                            },
+                        },
+                    },
+                    "camera_evidence": {
+                        "type": "object",
+                        "properties": {
+                            "visible_faces": {"type": "array", "items": {"type": "string"}},
+                            "occluded_details": {"type": "array", "items": {"type": "string"}},
+                            "view_limitations": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "unknown_or_ambiguous_details": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        }],
+        tool_choice={"type": "tool", "name": "record_identity_contract"},
         messages=[{
             "role": "user",
             "content": [
@@ -406,10 +442,17 @@ def analyze_product_with_claude(source_url: str, product_name: str, user_brief: 
             ],
         }],
     )
-    identity = claude_text(response)
-    if not identity:
-        raise RuntimeError("Claude returned an empty identity map.")
-    return normalize_identity_spec(identity)
+    tool_input = next(
+        (
+            block.input for block in response.content
+            if getattr(block, "type", "") == "tool_use"
+            and getattr(block, "name", "") == "record_identity_contract"
+        ),
+        None,
+    )
+    if not isinstance(tool_input, dict):
+        raise RuntimeError("Claude returned no structured identity contract.")
+    return normalize_identity_spec(json.dumps(tool_input))
 
 
 def direct_variant_with_claude(
