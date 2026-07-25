@@ -276,6 +276,28 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(spec["constraints"][0]["id"], "LOG-01")
         self.assertIn("[LOG-01] HARD LOGO", main.format_identity_spec(spec))
 
+    def test_identity_analysis_uses_schema_tool_output_instead_of_text_json(self):
+        tool_input = {
+            "canonical_name": "BLJ",
+            "product_category": "apparel",
+            "constraints": [{
+                "id": "GEO-01", "dimension": "geometry", "description": "Preserve silhouette",
+                "confidence": 0.95, "evidence": "observed", "hard": True,
+            }],
+        }
+        response = SimpleNamespace(content=[
+            SimpleNamespace(type="text", text='{"broken": "unterminated'),
+            SimpleNamespace(type="tool_use", name="record_identity_contract", input=tool_input),
+        ])
+        client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: response))
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+            patch.object(main, "Anthropic", return_value=client),
+        ):
+            spec = main.analyze_product_with_claude("https://source", "BLJ", "Preserve shape")
+        self.assertEqual(spec["canonical_name"], "BLJ")
+        self.assertEqual(spec["constraints"][0]["id"], "GEO-01")
+
     def test_variant_planner_balances_requested_dimensions(self):
         planned = main.plan_variants(
             ["US", "JP", "FR"], ["Amazon", "Instagram"], ["Studio", "Night"], 6,
