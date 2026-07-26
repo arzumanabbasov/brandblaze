@@ -6,6 +6,7 @@ import base64
 import csv
 import io
 import os
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -339,6 +340,29 @@ def claude_text(message) -> str:
     ).strip()
 
 
+def plain_image_prompt(raw: str) -> str:
+    """Remove document/table markup while preserving technical prompt content."""
+    output: list[str] = []
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
+        if not line or re.fullmatch(r"[-—_]{3,}", line):
+            continue
+        if line.startswith("|") and line.endswith("|"):
+            cells = [cell.strip().replace("**", "") for cell in line.strip("|").split("|")]
+            if not cells or cells[0].lower() == "light" or all(re.fullmatch(r":?-+:?", cell) for cell in cells):
+                continue
+            label = cells[0].upper()
+            if label in {"KEY", "FILL", "RIM", "BACKGROUND"}:
+                label += " LIGHT"
+            output.append(f"{label}: " + "; ".join(cells[1:]) + ".")
+            continue
+        line = re.sub(r"^#{1,6}\s*", "", line)
+        line = re.sub(r"^[-*]\s+", "", line)
+        line = line.replace("**", "").replace("__", "")
+        output.append(line)
+    return "\n".join(output).strip()
+
+
 def parse_json_object(raw: str) -> dict[str, Any]:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -507,7 +531,11 @@ def direct_variant_with_claude(
             "geometry, material, color, text, logo, components, or hardware. Artistic adjectives are allowed "
             "only when immediately grounded by a concrete set, palette, lighting, texture, or composition choice. "
             "No alternatives, empty luxury clichés, camera brand names, stereotypes, flags, tourist symbols, "
-            "or invented text. Keep the specification between 320 and 500 words."
+            "or invented text. This output is a direct image-model prompt, not a report: use plain text only. "
+            "Do not use Markdown, tables, pipe characters, hash headings, bold markers, bullet lists, horizontal "
+            "rules, or a document title. Render each required heading as an uppercase label followed by a colon. "
+            "Render each light as one compact labeled sentence: KEY LIGHT:, FILL LIGHT:, RIM LIGHT:, and "
+            "BACKGROUND LIGHT:. Keep the specification between 320 and 500 words."
         ),
         messages=[{
             "role": "user",
@@ -526,7 +554,7 @@ def direct_variant_with_claude(
             ),
         }],
     )
-    prompt = claude_text(response)
+    prompt = plain_image_prompt(claude_text(response))
     if not prompt:
         raise RuntimeError("Claude returned an empty creative and technical shot specification.")
     return prompt
