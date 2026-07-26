@@ -276,6 +276,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(spec["constraints"][0]["id"], "LOG-01")
         self.assertIn("[LOG-01] HARD LOGO", main.format_identity_spec(spec))
 
+    def test_view_dependent_pose_is_not_a_hard_identity_constraint(self):
+        spec = main.normalize_identity_spec(json.dumps({
+            "canonical_name": "Laptop",
+            "constraints": [{
+                "id": "VIEW-01", "dimension": "geometry",
+                "description": "Reference lid is open at 55 degrees",
+                "confidence": 1, "evidence": "observed", "hard": True,
+                "mutability": "view_dependent",
+            }],
+        }))
+        constraint = spec["constraints"][0]
+        self.assertFalse(constraint["hard"])
+        self.assertEqual(constraint["mutability"], "view_dependent")
+        self.assertIn("MUTABLE VIEW", main.format_identity_spec(spec))
+
     def test_identity_analysis_uses_schema_tool_output_instead_of_text_json(self):
         tool_input = {
             "canonical_name": "BLJ",
@@ -318,7 +333,11 @@ class ApiTests(unittest.TestCase):
             SimpleNamespace(type="text", text='{"broken": "unterminated'),
             SimpleNamespace(type="tool_use", name="record_visual_qa", input=tool_input),
         ])
-        client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: response))
+        captured = {}
+        def create(**kwargs):
+            captured.update(kwargs)
+            return response
+        client = SimpleNamespace(messages=SimpleNamespace(create=create))
         with (
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch.object(main, "Anthropic", return_value=client),
@@ -334,6 +353,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(qa["score"], 92)
         self.assertFalse(qa["critical_drift"])
         self.assertEqual(qa["axes"]["geometry"], 92)
+        self.assertIn("Never report a MUTABLE VIEW constraint as failed", captured["system"])
 
     def test_art_direction_is_a_quantified_camera_specification(self):
         captured = {}
@@ -359,6 +379,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("yaw/pitch/roll in degrees", captured["system"])
         self.assertIn("key-to-fill ratio", captured["system"])
         self.assertIn("Artistic adjectives are allowed", captured["system"])
+        self.assertIn("change camera azimuth or product yaw by 20-45 degrees", captured["system"])
+        self.assertIn("Do not copy the source camera position, pose, opening angle", captured["system"])
         self.assertIn("Do not use Markdown, tables, pipe characters", captured["system"])
         self.assertIn("KEY LIGHT:", captured["system"])
 
