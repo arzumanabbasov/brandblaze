@@ -359,6 +359,24 @@ class ApiTests(unittest.TestCase):
         self.assertIn("yaw/pitch/roll in degrees", captured["system"])
         self.assertIn("key-to-fill ratio", captured["system"])
         self.assertIn("Artistic adjectives are allowed", captured["system"])
+        self.assertIn("Do not use Markdown, tables, pipe characters", captured["system"])
+        self.assertIn("KEY LIGHT:", captured["system"])
+
+    def test_image_prompt_removes_markdown_table_syntax(self):
+        raw = """# SHOT SPEC
+---
+### LIGHTING GEOMETRY
+| Light | Type | Angle | CCT |
+|---|---|---|---|
+| Key | Fresnel | 35 degrees | 4800 K |
+- **Camera:** 85 mm
+"""
+        cleaned = main.plain_image_prompt(raw)
+        self.assertNotIn("|", cleaned)
+        self.assertNotIn("#", cleaned)
+        self.assertNotIn("**", cleaned)
+        self.assertIn("KEY LIGHT: Fresnel; 35 degrees; 4800 K.", cleaned)
+        self.assertIn("Camera: 85 mm", cleaned)
 
     def test_variant_planner_balances_requested_dimensions(self):
         planned = main.plan_variants(
