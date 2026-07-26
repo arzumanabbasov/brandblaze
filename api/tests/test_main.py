@@ -335,6 +335,29 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(qa["critical_drift"])
         self.assertEqual(qa["axes"]["geometry"], 92)
 
+    def test_art_direction_is_a_quantified_camera_specification(self):
+        captured = {}
+
+        def create(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="CAMERA: 85 mm; yaw 0 degrees")])
+
+        client = SimpleNamespace(messages=SimpleNamespace(create=create))
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+            patch.object(main, "Anthropic", return_value=client),
+        ):
+            prompt = main.direct_variant_with_claude(
+                "[GEO-01] Preserve silhouette", "BLJ", "Italy", "Editorial",
+                "Winter in Rome", "Quiet luxury",
+            )
+        self.assertIn("85 mm", prompt)
+        self.assertEqual(captured["temperature"], 0.15)
+        self.assertIn("product bounding box as x/y/w/h percentages", captured["system"])
+        self.assertIn("yaw/pitch/roll in degrees", captured["system"])
+        self.assertIn("key-to-fill ratio", captured["system"])
+        self.assertIn("No alternatives, vague adjectives", captured["system"])
+
     def test_variant_planner_balances_requested_dimensions(self):
         planned = main.plan_variants(
             ["US", "JP", "FR"], ["Amazon", "Instagram"], ["Studio", "Night"], 6,
