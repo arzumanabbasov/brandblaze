@@ -418,6 +418,14 @@ def format_identity_spec(spec: dict[str, Any]) -> str:
             f"({confidence}% confidence): {item.get('description')}"
         )
     unknown = spec.get("unknown_or_ambiguous_details") or []
+    evidence = spec.get("camera_evidence") or {}
+    visible_faces = evidence.get("visible_faces") or []
+    occluded = evidence.get("occluded_details") or []
+    limitations = evidence.get("view_limitations") or []
+    if visible_faces:
+        lines.append("REFERENCE-SUPPORTED VIEWS: " + "; ".join(str(item) for item in visible_faces))
+    if occluded or limitations:
+        lines.append("DO NOT REVEAL OR INVENT UNSUPPORTED SURFACES: " + "; ".join(str(item) for item in [*occluded, *limitations]))
     if unknown:
         lines.append("DO NOT INVENT: " + "; ".join(unknown))
     return "\n".join(lines)
@@ -518,18 +526,19 @@ def direct_variant_with_claude(
 ) -> str:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        max_tokens=1400,
-        temperature=0.3,
+        max_tokens=1000,
+        temperature=0.22,
         system=(
             "You are both an award-winning commercial art director and a technical photography engineer. "
             "Design one emotionally distinctive campaign image, then translate that creative intent into an "
             "executable shot specification using explicit numbers, units, coordinates, ratios, and tolerances. "
             "The artistic concept must feel authored and memorable, while every technical choice must support "
-            "it. Preserve the reference product exactly. Output only the specification under exactly these "
-            "headings: IDENTITY CONSTRAINTS; CREATIVE DIRECTION; CANVAS & "
+            "it. The application will inject the canonical identity contract verbatim before your output, so "
+            "do not summarize or restate identity constraints. Output only the shot plan under exactly these "
+            "headings: CREATIVE DIRECTION; CANVAS & "
             "SUBJECT GEOMETRY; CAMERA; FOCUS & EXPOSURE; LIGHTING GEOMETRY; SET & COLOR; CHANNEL CROP; "
             "NEGATIVE CONSTRAINTS. CREATIVE DIRECTION must define the visual idea, emotional tone, material "
-            "contrast, palette logic, atmosphere, and culturally subtle market relevance in 50-80 words. "
+            "contrast, palette logic, atmosphere, and culturally subtle market relevance in 35-60 words. "
             "Then include: aspect ratio and pixel target; product bounding box as x/y/w/h "
             "percentages; product frame occupancy; safe margins; horizon height; camera-to-product distance "
             "in metres; camera height in metres; yaw/pitch/roll in degrees; full-frame-equivalent focal length "
@@ -537,10 +546,13 @@ def direct_variant_with_claude(
             "each light's type, position angle, elevation angle, distance, CCT, relative output, and key-to-fill "
             "ratio; surface reflectance and shadow direction. Use physically plausible values. Keep the entire "
             "product unobstructed and uncropped at 65-80% frame height. Identity constraints override every "
-            "creative choice. Deliberately create a materially different product presentation from the source: "
-            "change camera azimuth or product yaw by 20-45 degrees and, for articulated products, choose a new "
-            "physically valid configuration within the authentic mechanism range. Do not copy the source camera "
-            "position, pose, opening angle, crop, or shadow layout. Show another truthful side when useful. "
+            "creative choice. Create controlled variation without outrunning the reference evidence. Preserve the "
+            "same source-visible product faces by default. Change camera azimuth or product yaw by only 10-20 "
+            "degrees; create most novelty through camera elevation, framing, environment, lighting, and negative "
+            "space. Keep articulated products within 10 degrees of the observed configuration unless multiple "
+            "reference-supported states are known. Never reveal a screen, underside, back, interior, port side, "
+            "label side, or other surface that is occluded or uncertain in the source. Do not copy the exact source "
+            "crop or shadow layout, but do not rotate merely for novelty. "
             "View-dependent constraints are permissions and evidence, not pose locks. "
             "Market and aesthetic may affect pose, viewpoint, set, palette, and lighting—not product "
             "geometry, material, color, text, logo, components, or hardware. Artistic adjectives are allowed "
@@ -550,7 +562,7 @@ def direct_variant_with_claude(
             "Do not use Markdown, tables, pipe characters, hash headings, bold markers, bullet lists, horizontal "
             "rules, or a document title. Render each required heading as an uppercase label followed by a colon. "
             "Render each light as one compact labeled sentence: KEY LIGHT:, FILL LIGHT:, RIM LIGHT:, and "
-            "BACKGROUND LIGHT:. Keep the specification between 320 and 500 words."
+            "BACKGROUND LIGHT:. Keep the shot plan between 220 and 340 words."
         ),
         messages=[{
             "role": "user",
@@ -569,10 +581,15 @@ def direct_variant_with_claude(
             ),
         }],
     )
-    prompt = plain_image_prompt(claude_text(response))
-    if not prompt:
+    shot_plan = plain_image_prompt(claude_text(response))
+    if not shot_plan:
         raise RuntimeError("Claude returned an empty creative and technical shot specification.")
-    return prompt
+    return (
+        "NON-NEGOTIABLE PRODUCT IDENTITY — COPY EXACTLY FROM THE REFERENCE:\n"
+        f"{identity_map}\n\n"
+        "CONTROLLED CAMPAIGN SHOT PLAN:\n"
+        f"{shot_plan}"
+    )
 
 
 QA_AXES = (
