@@ -2,6 +2,8 @@
 
 **One product photograph in. An identity-consistent campaign library out.**
 
+For a visual, end-to-end explanation of the architecture and pipeline, see [How BrandBlaze Works](docs/HOW_BRANDBLAZE_WORKS.md).
+
 BrandBlaze is visual CI/CD for product campaigns. It transforms a single reference photograph into market-, channel-, and environment-specific imagery, tests every output against a machine-readable identity contract, repairs failed constraints, and preserves the complete decision record. Claude provides visual analysis and direction, Genblaze orchestrates GMI Cloud image editing, and Backblaze B2 stores the source, generated assets, manifests, hashes, approvals, and run index.
 
 The project was built for the **Backblaze Generative Media Hackathon: Build with Genblaze on B2**.
