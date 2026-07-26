@@ -485,14 +485,18 @@ def direct_variant_with_claude(
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
         max_tokens=1400,
-        temperature=0.15,
+        temperature=0.3,
         system=(
-            "You are a technical commercial-photography engineer writing an executable image-editing "
-            "specification, not an artistic mood prompt. Create one deterministic shot plan using explicit "
-            "numbers, units, coordinates, ratios, and tolerances. Preserve the reference product exactly. "
-            "Output only the specification under exactly these headings: IDENTITY CONSTRAINTS; CANVAS & "
+            "You are both an award-winning commercial art director and a technical photography engineer. "
+            "Design one emotionally distinctive campaign image, then translate that creative intent into an "
+            "executable shot specification using explicit numbers, units, coordinates, ratios, and tolerances. "
+            "The artistic concept must feel authored and memorable, while every technical choice must support "
+            "it. Preserve the reference product exactly. Output only the specification under exactly these "
+            "headings: IDENTITY CONSTRAINTS; CREATIVE DIRECTION; CANVAS & "
             "SUBJECT GEOMETRY; CAMERA; FOCUS & EXPOSURE; LIGHTING GEOMETRY; SET & COLOR; CHANNEL CROP; "
-            "NEGATIVE CONSTRAINTS. Include: aspect ratio and pixel target; product bounding box as x/y/w/h "
+            "NEGATIVE CONSTRAINTS. CREATIVE DIRECTION must define the visual idea, emotional tone, material "
+            "contrast, palette logic, atmosphere, and culturally subtle market relevance in 50-80 words. "
+            "Then include: aspect ratio and pixel target; product bounding box as x/y/w/h "
             "percentages; product frame occupancy; safe margins; horizon height; camera-to-product distance "
             "in metres; camera height in metres; yaw/pitch/roll in degrees; full-frame-equivalent focal length "
             "in mm; aperture, shutter, ISO, focus distance, depth-of-field target, and white balance in kelvin; "
@@ -500,9 +504,10 @@ def direct_variant_with_claude(
             "ratio; surface reflectance and shadow direction. Use physically plausible values. Keep the entire "
             "product unobstructed and uncropped at 65-80% frame height. Identity constraints override every "
             "creative choice. Market and aesthetic may affect only the set, palette, and lighting—not product "
-            "geometry, material, color, text, logo, components, or hardware. No alternatives, vague adjectives, "
-            "camera brand names, storytelling prose, stereotypes, flags, tourist symbols, or invented text. "
-            "Keep the specification between 260 and 420 words."
+            "geometry, material, color, text, logo, components, or hardware. Artistic adjectives are allowed "
+            "only when immediately grounded by a concrete set, palette, lighting, texture, or composition choice. "
+            "No alternatives, empty luxury clichés, camera brand names, stereotypes, flags, tourist symbols, "
+            "or invented text. Keep the specification between 320 and 500 words."
         ),
         messages=[{
             "role": "user",
@@ -523,7 +528,7 @@ def direct_variant_with_claude(
     )
     prompt = claude_text(response)
     if not prompt:
-        raise RuntimeError("Claude returned an empty technical shot specification.")
+        raise RuntimeError("Claude returned an empty creative and technical shot specification.")
     return prompt
 
 
