@@ -352,11 +352,13 @@ class ApiTests(unittest.TestCase):
                 "Winter in Rome", "Quiet luxury",
             )
         self.assertIn("85 mm", prompt)
-        self.assertEqual(captured["temperature"], 0.15)
+        self.assertEqual(captured["temperature"], 0.3)
+        self.assertIn("CREATIVE DIRECTION", captured["system"])
+        self.assertIn("emotionally distinctive campaign image", captured["system"])
         self.assertIn("product bounding box as x/y/w/h percentages", captured["system"])
         self.assertIn("yaw/pitch/roll in degrees", captured["system"])
         self.assertIn("key-to-fill ratio", captured["system"])
-        self.assertIn("No alternatives, vague adjectives", captured["system"])
+        self.assertIn("Artistic adjectives are allowed", captured["system"])
 
     def test_variant_planner_balances_requested_dimensions(self):
         planned = main.plan_variants(
