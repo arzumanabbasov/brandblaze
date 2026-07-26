@@ -380,6 +380,9 @@ def normalize_identity_spec(raw: str) -> dict[str, Any]:
         if not isinstance(item, dict) or not str(item.get("description") or "").strip():
             continue
         dimension = str(item.get("dimension") or "identity").lower().replace(" ", "_")
+        mutability = str(item.get("mutability") or "immutable")
+        if mutability not in {"immutable", "view_dependent"}:
+            mutability = "immutable"
         prefix = "".join(part[0] for part in dimension.split("_") if part)[:3].upper() or "ID"
         constraints.append({
             "id": str(item.get("id") or f"{prefix}-{index:02d}")[:24],
@@ -387,12 +390,13 @@ def normalize_identity_spec(raw: str) -> dict[str, Any]:
             "description": str(item["description"]).strip()[:500],
             "confidence": max(0.0, min(1.0, float(item.get("confidence", 0.7)))),
             "evidence": str(item.get("evidence") or "observed")[:40],
-            "hard": bool(item.get("hard", True)),
+            "hard": bool(item.get("hard", True)) if mutability == "immutable" else False,
+            "mutability": mutability,
         })
     if not constraints:
         raise ValueError("Claude returned no usable identity constraints.")
     return {
-        "version": 1,
+        "version": 2,
         "canonical_name": str(value.get("canonical_name") or "Unnamed product")[:160],
         "product_category": str(value.get("product_category") or "product")[:100],
         "constraints": constraints,
@@ -408,7 +412,7 @@ def format_identity_spec(spec: dict[str, Any]) -> str:
     lines = [f"{spec.get('canonical_name', 'Product')} · {spec.get('product_category', 'product')}"]
     for item in spec.get("constraints", []):
         confidence = round(float(item.get("confidence", 0)) * 100)
-        strength = "HARD" if item.get("hard") else "SOFT"
+        strength = "MUTABLE VIEW" if item.get("mutability") == "view_dependent" else "HARD" if item.get("hard") else "SOFT"
         lines.append(
             f"[{item.get('id')}] {strength} {str(item.get('dimension', 'identity')).upper()} "
             f"({confidence}% confidence): {item.get('description')}"
@@ -428,6 +432,11 @@ def analyze_product_with_claude(source_url: str, product_name: str, user_brief: 
             "You are the visual continuity director for a world-class product photography studio. "
             "Inspect the reference with forensic care and produce a machine-readable product contract. "
             "Separate immutable identity from mutable art direction. Never invent occluded details. "
+            "A product's pose, orientation, camera-relative yaw, opening angle, articulation state, and which "
+            "face is visible are view-dependent presentation variables, not intrinsic identity. Mark them "
+            "view_dependent and never hard unless the owner explicitly requires the exact pose. A port or logo "
+            "must remain in the correct physical location but need not be visible from every new camera angle. "
+            "Preserve authentic mechanical ranges. "
             "Call the provided tool exactly once. Use no more than 16 concise constraints. Use stable "
             "unique constraint IDs. Treat visible or owner-specified logos, text, component count, "
             "geometry, color, material, and distinctive hardware as hard constraints."
@@ -446,7 +455,7 @@ def analyze_product_with_claude(source_url: str, product_name: str, user_brief: 
                         "maxItems": 16,
                         "items": {
                             "type": "object",
-                            "required": ["id", "dimension", "description", "confidence", "evidence", "hard"],
+                            "required": ["id", "dimension", "description", "confidence", "evidence", "hard", "mutability"],
                             "properties": {
                                 "id": {"type": "string"},
                                 "dimension": {
@@ -457,6 +466,7 @@ def analyze_product_with_claude(source_url: str, product_name: str, user_brief: 
                                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                                 "evidence": {"type": "string", "enum": ["observed", "owner_provided", "inferred"]},
                                 "hard": {"type": "boolean"},
+                                "mutability": {"type": "string", "enum": ["immutable", "view_dependent"]},
                             },
                         },
                     },
@@ -527,7 +537,12 @@ def direct_variant_with_claude(
             "each light's type, position angle, elevation angle, distance, CCT, relative output, and key-to-fill "
             "ratio; surface reflectance and shadow direction. Use physically plausible values. Keep the entire "
             "product unobstructed and uncropped at 65-80% frame height. Identity constraints override every "
-            "creative choice. Market and aesthetic may affect only the set, palette, and lighting—not product "
+            "creative choice. Deliberately create a materially different product presentation from the source: "
+            "change camera azimuth or product yaw by 20-45 degrees and, for articulated products, choose a new "
+            "physically valid configuration within the authentic mechanism range. Do not copy the source camera "
+            "position, pose, opening angle, crop, or shadow layout. Show another truthful side when useful. "
+            "View-dependent constraints are permissions and evidence, not pose locks. "
+            "Market and aesthetic may affect pose, viewpoint, set, palette, and lighting—not product "
             "geometry, material, color, text, logo, components, or hardware. Artistic adjectives are allowed "
             "only when immediately grounded by a concrete set, palette, lighting, texture, or composition choice. "
             "No alternatives, empty luxury clichés, camera brand names, stereotypes, flags, tourist symbols, "
@@ -637,8 +652,11 @@ def evaluate_variant_with_claude(
         system=(
             "You are a strict product-continuity inspector. Compare the source product in image one "
             "with the generated product in image two, using the canonical identity lock as the binding "
-            "specification. Ignore background, lighting, camera angle, and props. Inspect geometry, color, "
-            "material, surface, pattern, logo/label fidelity, hardware, component count, and distinctive "
+            "specification. Ignore background, lighting, camera angle, and props. "
+            "Do not penalize a physically valid change in pose, articulation, opening angle, viewpoint, or the "
+            "visibility of a feature hidden naturally by the new angle. Never report a MUTABLE VIEW constraint "
+            "as failed. Judge whether intrinsic geometry and feature placement remain correct in 3D. "
+            "Inspect geometry, color, material, surface, pattern, logo/label fidelity, hardware, component count, and distinctive "
             "construction. Set critical_drift=true when any named logo or marking is missing or altered, "
             "the primary color or material changes, a distinctive component is missing or added, or core "
             "geometry changes. A critical defect cannot be compensated for by overall visual similarity. "
