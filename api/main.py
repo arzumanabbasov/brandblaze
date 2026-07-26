@@ -484,20 +484,25 @@ def direct_variant_with_claude(
 ) -> str:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        max_tokens=1100,
-        temperature=0.35,
+        max_tokens=1400,
+        temperature=0.15,
         system=(
-            "You are an elite commercial art director writing executable prompts for a high-end "
-            "image-editing model. Create one decisive photographic concept, not options. The reference "
-            "product must remain geometrically and materially faithful. Translate market context through "
-            "light, space, color, props, and composition—never stereotypes, flags, tourist symbols, or "
-            "written text. Specify lens, camera height, framing, lighting, palette, surface, depth, "
-            "atmosphere, and product placement. Keep the complete product unobstructed, uncropped, "
-            "tack-sharp, and visually dominant at 65-80% of frame height. Preserve every named logo, "
-            "label, closure, pocket, hardware element, seam, and distinctive component exactly. "
-            "Make it authored, tactile, expensive, and editorial—not "
-            "generic AI art. Output only the final 180–260 word image prompt. Put identity constraints "
-            "first and negative constraints last."
+            "You are a technical commercial-photography engineer writing an executable image-editing "
+            "specification, not an artistic mood prompt. Create one deterministic shot plan using explicit "
+            "numbers, units, coordinates, ratios, and tolerances. Preserve the reference product exactly. "
+            "Output only the specification under exactly these headings: IDENTITY CONSTRAINTS; CANVAS & "
+            "SUBJECT GEOMETRY; CAMERA; FOCUS & EXPOSURE; LIGHTING GEOMETRY; SET & COLOR; CHANNEL CROP; "
+            "NEGATIVE CONSTRAINTS. Include: aspect ratio and pixel target; product bounding box as x/y/w/h "
+            "percentages; product frame occupancy; safe margins; horizon height; camera-to-product distance "
+            "in metres; camera height in metres; yaw/pitch/roll in degrees; full-frame-equivalent focal length "
+            "in mm; aperture, shutter, ISO, focus distance, depth-of-field target, and white balance in kelvin; "
+            "each light's type, position angle, elevation angle, distance, CCT, relative output, and key-to-fill "
+            "ratio; surface reflectance and shadow direction. Use physically plausible values. Keep the entire "
+            "product unobstructed and uncropped at 65-80% frame height. Identity constraints override every "
+            "creative choice. Market and aesthetic may affect only the set, palette, and lighting—not product "
+            "geometry, material, color, text, logo, components, or hardware. No alternatives, vague adjectives, "
+            "camera brand names, storytelling prose, stereotypes, flags, tourist symbols, or invented text. "
+            "Keep the specification between 260 and 420 words."
         ),
         messages=[{
             "role": "user",
@@ -518,7 +523,7 @@ def direct_variant_with_claude(
     )
     prompt = claude_text(response)
     if not prompt:
-        raise RuntimeError("Claude returned an empty art-direction prompt.")
+        raise RuntimeError("Claude returned an empty technical shot specification.")
     return prompt
 
 
