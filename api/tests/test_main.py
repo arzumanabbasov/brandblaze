@@ -372,15 +372,17 @@ class ApiTests(unittest.TestCase):
                 "Winter in Rome", "Quiet luxury",
             )
         self.assertIn("85 mm", prompt)
-        self.assertEqual(captured["temperature"], 0.3)
+        self.assertEqual(captured["temperature"], 0.22)
         self.assertIn("CREATIVE DIRECTION", captured["system"])
         self.assertIn("emotionally distinctive campaign image", captured["system"])
         self.assertIn("product bounding box as x/y/w/h percentages", captured["system"])
         self.assertIn("yaw/pitch/roll in degrees", captured["system"])
         self.assertIn("key-to-fill ratio", captured["system"])
         self.assertIn("Artistic adjectives are allowed", captured["system"])
-        self.assertIn("change camera azimuth or product yaw by 20-45 degrees", captured["system"])
-        self.assertIn("Do not copy the source camera position, pose, opening angle", captured["system"])
+        self.assertIn("Change camera azimuth or product yaw by only 10-20", captured["system"])
+        self.assertIn("Never reveal a screen, underside, back, interior", captured["system"])
+        self.assertIn("NON-NEGOTIABLE PRODUCT IDENTITY", prompt)
+        self.assertIn("[GEO-01] Preserve silhouette", prompt)
         self.assertIn("Do not use Markdown, tables, pipe characters", captured["system"])
         self.assertIn("KEY LIGHT:", captured["system"])
 
@@ -399,6 +401,22 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("**", cleaned)
         self.assertIn("KEY LIGHT: Fresnel; 35 degrees; 4800 K.", cleaned)
         self.assertIn("Camera: 85 mm", cleaned)
+
+    def test_identity_map_exposes_reference_view_limits_to_the_generator(self):
+        spec = {
+            "canonical_name": "Laptop",
+            "product_category": "computer",
+            "constraints": [],
+            "camera_evidence": {
+                "visible_faces": ["lid exterior", "partial left edge"],
+                "occluded_details": ["screen", "underside"],
+                "view_limitations": ["right edge not observed"],
+            },
+            "unknown_or_ambiguous_details": [],
+        }
+        formatted = main.format_identity_spec(spec)
+        self.assertIn("REFERENCE-SUPPORTED VIEWS: lid exterior; partial left edge", formatted)
+        self.assertIn("DO NOT REVEAL OR INVENT UNSUPPORTED SURFACES: screen; underside; right edge not observed", formatted)
 
     def test_variant_planner_balances_requested_dimensions(self):
         planned = main.plan_variants(
