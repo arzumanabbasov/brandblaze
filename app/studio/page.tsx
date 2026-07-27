@@ -122,11 +122,18 @@ export default function StudioPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${API_URL}/health`, { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : Promise.reject())
-      .then((value: Health) => setHealth(value))
-      .catch(() => setHealth(null));
-    return () => controller.abort();
+    const checkHealth = () => {
+      fetch(`${API_URL}/health`, { signal: controller.signal })
+        .then((response) => response.ok ? response.json() : Promise.reject())
+        .then((value: Health) => setHealth(value))
+        .catch(() => setHealth(null));
+    };
+    checkHealth();
+    const interval = window.setInterval(checkHealth, 5000);
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
+    };
   }, []);
 
   function onFile(event: ChangeEvent<HTMLInputElement>) {
