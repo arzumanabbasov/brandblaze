@@ -10,6 +10,8 @@ type Variant = {
   channel: string;
   environment: string;
   objective?: string;
+  treatment?: string;
+  style?: string;
   status: "queued" | "generating" | "reviewing" | "ready" | "flagged" | "failed";
   url?: string;
   provider?: string;
@@ -85,7 +87,7 @@ const API_URL =
 const markets = ["United States", "Japan", "France", "Brazil", "United Kingdom", "South Korea", "UAE", "Italy", "Germany", "India"];
 const channels = ["Instagram", "Amazon", "Billboard", "Editorial", "TikTok", "Pinterest", "E-commerce PDP", "Print campaign", "Retail display", "Email"];
 const environments = ["Studio", "Tokyo night", "Alpine morning", "Coastal summer", "Museum plinth", "Desert dusk", "Rainy city", "Botanical glasshouse", "Luxury hotel", "Modern kitchen"];
-const aesthetics = ["Quiet luxury", "Editorial surrealism", "Kinetic color", "Future naturalism", "Neo-classical", "Cinematic noir", "Soft minimalism", "Maximalist pop"];
+const aesthetics = ["Auto-diversify", "Quiet luxury", "Editorial surrealism", "Kinetic color", "Future naturalism", "Neo-classical", "Cinematic noir", "Soft minimalism", "Maximalist pop"];
 
 function toggle(list: string[], value: string, setter: (value: string[]) => void) {
   setter(list.includes(value) ? list.filter((item) => item !== value) : [...list, value]);
@@ -99,7 +101,7 @@ export default function StudioPage() {
   const [selectedMarkets, setSelectedMarkets] = useState(["United States", "Japan"]);
   const [selectedChannels, setSelectedChannels] = useState(["Instagram", "Amazon"]);
   const [selectedEnvironments, setSelectedEnvironments] = useState(["Studio", "Tokyo night"]);
-  const [aesthetic, setAesthetic] = useState("Quiet luxury");
+  const [aesthetic, setAesthetic] = useState("Auto-diversify");
   const [run, setRun] = useState<ReactorRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -348,7 +350,8 @@ export default function StudioPage() {
               <ChoiceGroup number="B" title="Channels" options={channels} selected={selectedChannels} onToggle={(value) => toggle(selectedChannels, value, setSelectedChannels)} />
               <ChoiceGroup number="C" title="Environments" options={environments} selected={selectedEnvironments} onToggle={(value) => toggle(selectedEnvironments, value, setSelectedEnvironments)} />
               <div className="choiceGroup">
-                <div className="panelTitle small"><span>D</span><h2>Art direction</h2></div>
+                <div className="panelTitle small"><span>D</span><h2>Creative strategy</h2></div>
+                <p className="stepIntro">Auto-diversify gives every campaign slot a distinct visual style. Choose one style only when you intentionally want a unified art direction.</p>
                 <div className="aestheticGrid">
                   {aesthetics.map((item, index) => (
                     <button type="button" className={aesthetic === item ? "selected" : ""} onClick={() => setAesthetic(item)} key={item}>
@@ -369,7 +372,7 @@ export default function StudioPage() {
                 <div><dt>Markets</dt><dd>{selectedMarkets.join(", ")}</dd></div>
                 <div><dt>Channels</dt><dd>{selectedChannels.join(", ")}</dd></div>
                 <div><dt>Scenes</dt><dd>{selectedEnvironments.join(", ")}</dd></div>
-                <div><dt>Direction</dt><dd>{aesthetic}</dd></div>
+                <div><dt>Strategy</dt><dd>{aesthetic}</dd></div>
               </dl>
               <div className="costPreview">
                 <b>Maximum run budget</b>
@@ -474,6 +477,8 @@ export default function StudioPage() {
                           <h3>{variant.label}</h3>
                           <p>{variant.market} · {variant.channel}</p>
                           {variant.objective && <p className="objective">{variant.objective}</p>}
+                          {variant.treatment && <p className="treatment">{variant.treatment.split(" — ")[0]}</p>}
+                          {variant.style && <p className="variantStyle">{variant.style}</p>}
                           {variant.qa_notes && <p className="qaNote">{variant.qa_notes}</p>}
                           {!!variant.qa_violations?.length && (
                             <ul className="violationList">

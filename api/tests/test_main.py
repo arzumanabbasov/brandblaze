@@ -354,6 +354,8 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(qa["critical_drift"])
         self.assertEqual(qa["axes"]["geometry"], 92)
         self.assertIn("Never report a MUTABLE VIEW constraint as failed", captured["system"])
+        self.assertIn("Product prominence and channel fit are advisory", captured["system"])
+        self.assertIn("tolerate physically plausible warm/cool casts", captured["system"])
 
     def test_art_direction_is_a_quantified_camera_specification(self):
         captured = {}
@@ -385,6 +387,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("[GEO-01] Preserve silhouette", prompt)
         self.assertIn("Do not use Markdown, tables, pipe characters", captured["system"])
         self.assertIn("KEY LIGHT:", captured["system"])
+        self.assertIn("MANDATORY CAMPAIGN COMPOSITION", captured["messages"][0]["content"])
+        self.assertIn("Never fall back to a centered upright hero shot", captured["system"])
 
     def test_image_prompt_removes_markdown_table_syntax(self):
         raw = """# SHOT SPEC
@@ -426,6 +430,31 @@ class ApiTests(unittest.TestCase):
         self.assertEqual({item.market for item in planned}, {"US", "JP", "FR"})
         self.assertEqual({item.channel for item in planned}, {"Amazon", "Instagram"})
         self.assertEqual({item.environment for item in planned}, {"Studio", "Night"})
+
+    def test_auto_diversify_assigns_unique_styles_and_compositions(self):
+        planned = main.plan_variants(
+            ["US", "Brazil"], ["Instagram", "Pinterest", "Print campaign"],
+            ["Rainy city", "Hiking"], 12, "Auto-diversify",
+        )
+        self.assertEqual(len({item.treatment for item in planned}), 12)
+        self.assertEqual(len({item.style for item in planned}), 12)
+
+    def test_creative_scores_do_not_lower_identity_acceptance_score(self):
+        qa = main.normalize_qa_result({
+            "score": 72,
+            "critical_drift": False,
+            "axes": {
+                "geometry": 95, "component_count": 96, "color": 91, "material": 93,
+                "logo_markings": 94, "text_integrity": 95,
+                "product_prominence": 68, "channel_fit": 52,
+            },
+            "violations": ["Channel composition could be stronger"],
+            "failed_constraint_ids": [],
+            "notes": "Product is accurate; composition is conservative.",
+            "repair_plan": {"retry_recommended": False},
+        })
+        self.assertEqual(qa["score"], 94)
+        self.assertTrue(main.identity_passes(qa["score"], 85, qa["critical_drift"]))
 
     def test_human_decision_is_persisted_to_campaign_record(self):
         run_id = "decision-run"
