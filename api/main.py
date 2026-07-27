@@ -469,7 +469,13 @@ def format_identity_spec(spec: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def analyze_product_with_claude(source_url: str, product_name: str, user_brief: str) -> dict[str, Any]:
+def analyze_product_with_claude(
+    source_key: str,
+    source_media_type: str,
+    product_name: str,
+    user_brief: str,
+) -> dict[str, Any]:
+    source_image = b2_image_block(source_key, source_media_type)
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
         max_tokens=2200,
@@ -532,7 +538,7 @@ def analyze_product_with_claude(source_url: str, product_name: str, user_brief: 
         messages=[{
             "role": "user",
             "content": [
-                {"type": "image", "source": {"type": "url", "url": source_url}},
+                source_image,
                 {
                     "type": "text",
                     "text": f"Product: {product_name}\nOwner notes: {user_brief}\nCreate the identity lock.",
@@ -961,6 +967,7 @@ def execute_variant(
 def process_run(
     run_id: str,
     source_url: str,
+    source_key: str,
     product_name: str,
     brief: str,
     aesthetic: str,
@@ -975,7 +982,12 @@ def process_run(
     manifests: list[str] = []
     failures: list[str] = []
     try:
-        identity_spec = analyze_product_with_claude(source_url, product_name, brief)
+        identity_spec = analyze_product_with_claude(
+            source_key,
+            source_media_type,
+            product_name,
+            brief,
+        )
         identity_map = format_identity_spec(identity_spec)
         with RUN_LOCK:
             RUNS[run_id]["identity_spec"] = identity_spec
@@ -1152,6 +1164,7 @@ async def create_run(
         args=(
             run_id,
             source_url,
+            source_key,
             product_name,
             brief,
             aesthetic,

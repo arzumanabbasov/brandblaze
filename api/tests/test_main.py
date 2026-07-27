@@ -308,10 +308,14 @@ class ApiTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch.object(main, "Anthropic", return_value=client),
+            patch.object(main, "b2_image_block", return_value={
+                "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="},
+            }) as image_block,
         ):
-            spec = main.analyze_product_with_claude("https://source", "BLJ", "Preserve shape")
+            spec = main.analyze_product_with_claude("source.png", "image/png", "BLJ", "Preserve shape")
         self.assertEqual(spec["canonical_name"], "BLJ")
         self.assertEqual(spec["constraints"][0]["id"], "GEO-01")
+        image_block.assert_called_once_with("source.png", "image/png")
 
     def test_visual_qa_uses_schema_tool_output_instead_of_text_json(self):
         tool_input = {
