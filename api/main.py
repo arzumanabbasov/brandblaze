@@ -47,6 +47,8 @@ class Variant:
     channel: str
     environment: str
     objective: str | None = None
+    treatment: str | None = None
+    style: str | None = None
     status: str = "queued"
     url: str | None = None
     durable_url: str | None = None
@@ -114,6 +116,36 @@ CHANNEL_OBJECTIVES = {
     "Print campaign": "Premium campaign storytelling",
 }
 
+CAMPAIGN_TREATMENTS = [
+    "ASYMMETRIC HERO — product on the left third, large clean negative space on the right, slight low camera elevation; avoid centered catalogue framing.",
+    "COMPONENT DIALOGUE — arrange every reference-supported detachable component beside the main body on a strong diagonal; equal visual importance, no attachment invention.",
+    "SUPPORTED TOP-DOWN — high oblique view using only reference-supported top surfaces; graphic spacing and long directional shadows, complete product visible.",
+    "LOW MONOLITH — near-surface camera, product rising vertically with a simplified horizon and strong silhouette; preserve all readable markings.",
+    "DEPTH LAYERS — place a supported detachable component in the near foreground and the main product behind it, both sharp enough for identity review.",
+    "REFLECTION AXIS — full product offset from center with one controlled reflection or shadow echo creating a second visual axis; no duplicate physical product.",
+    "ARCHITECTURAL FRAME — use a doorway, niche, frame, or light plane around the complete product; product remains isolated and unobstructed.",
+    "DIAGONAL ENERGY — product and supported components follow a lower-left to upper-right visual vector with directional light; avoid straight-on symmetry.",
+    "QUIET WIDE — product occupies 55-65% of frame height at one outer third with expansive environmental storytelling and strict crop safety.",
+    "GRAPHIC COLOR FIELD — minimal set with two large geometric color planes and a crisp cast shadow; no generic wet tabletop or bokeh background.",
+    "ELEVATED PLINTH — product on a distinctive raised material block, camera slightly above eye level, visible separation from background.",
+    "FUNCTIONAL STATE — show one authentic, reference-supported mechanical state or component relationship different from the adjacent campaign slots; no human hands.",
+]
+
+VARIANT_STYLES = [
+    "Clean sculptural studio",
+    "Warm documentary daylight",
+    "Graphic color blocking",
+    "Tactile natural materials",
+    "High-key soft minimalism",
+    "Editorial surrealism",
+    "Precision industrial",
+    "Sunlit architectural",
+    "Rich analogue film",
+    "Future naturalism",
+    "Bold kinetic color",
+    "Low-key cinematic noir",
+]
+
 
 def persist_run(run_id: str) -> None:
     path = RUNTIME_DIR / f"{run_id}.json"
@@ -164,6 +196,7 @@ def plan_variants(
     channels: list[str],
     environments: list[str],
     limit: int,
+    aesthetic: str = "Auto-diversify",
 ) -> list[Variant]:
     candidates = [
         (market, channel, environment)
@@ -194,8 +227,13 @@ def plan_variants(
             channel=channel,
             environment=environment,
             objective=CHANNEL_OBJECTIVES.get(channel, "Commercial product communication"),
+            treatment=CAMPAIGN_TREATMENTS[index % len(CAMPAIGN_TREATMENTS)],
+            style=(
+                VARIANT_STYLES[index % len(VARIANT_STYLES)]
+                if aesthetic == "Auto-diversify" else aesthetic
+            ),
         )
-        for market, channel, environment in chosen
+        for index, (market, channel, environment) in enumerate(chosen)
     ]
 
 
@@ -522,6 +560,7 @@ def direct_variant_with_claude(
     channel: str,
     environment: str,
     aesthetic: str,
+    treatment: str | None = None,
     repair_plan: dict[str, Any] | None = None,
 ) -> str:
     response = Anthropic(api_key=required("ANTHROPIC_API_KEY")).messages.create(
@@ -553,6 +592,10 @@ def direct_variant_with_claude(
             "reference-supported states are known. Never reveal a screen, underside, back, interior, port side, "
             "label side, or other surface that is occluded or uncertain in the source. Do not copy the exact source "
             "crop or shadow layout, but do not rotate merely for novelty. "
+            "The assigned CAMPAIGN COMPOSITION is mandatory and must visibly control object arrangement, camera "
+            "elevation, negative space, and shadow geometry. Never fall back to a centered upright hero shot when "
+            "the assigned composition says otherwise. The composition must remain visibly distinct from other "
+            "campaign slots even when environment and aesthetic repeat. "
             "View-dependent constraints are permissions and evidence, not pose locks. "
             "Market and aesthetic may affect pose, viewpoint, set, palette, and lighting—not product "
             "geometry, material, color, text, logo, components, or hardware. Artistic adjectives are allowed "
@@ -571,6 +614,7 @@ def direct_variant_with_claude(
                 f"ENVIRONMENT: {environment}\nAESTHETIC: {aesthetic}\n"
                 f"CAMPAIGN OBJECTIVE: {CHANNEL_OBJECTIVES.get(channel, 'Clear commercial product communication')}\n"
                 f"CHANNEL REQUIREMENTS: {CHANNEL_REQUIREMENTS.get(channel, 'Keep the product dominant, legible, and crop-safe.')}\n\n"
+                f"MANDATORY CAMPAIGN COMPOSITION: {treatment or CAMPAIGN_TREATMENTS[0]}\n\n"
                 f"CANONICAL IDENTITY LOCK:\n{identity_map}"
                 + (
                     "\n\nTARGETED REPAIR CONTRACT:\n"
@@ -600,11 +644,15 @@ QA_AXES = (
 
 def normalize_qa_result(result: dict[str, Any]) -> dict[str, Any]:
     try:
-        score = max(0, min(100, int(result["score"])))
+        reported_score = max(0, min(100, int(result["score"])))
         axes = {
-            axis: max(0, min(100, int((result.get("axes") or {}).get(axis, score))))
+            axis: max(0, min(100, int((result.get("axes") or {}).get(axis, reported_score))))
             for axis in QA_AXES
         }
+        identity_axes = (
+            "geometry", "component_count", "color", "material", "logo_markings", "text_integrity",
+        )
+        score = round(sum(axes[axis] for axis in identity_axes) / len(identity_axes))
         violations = [
             str(item)[:180]
             for item in result.get("violations", [])
@@ -673,6 +721,15 @@ def evaluate_variant_with_claude(
             "Do not penalize a physically valid change in pose, articulation, opening angle, viewpoint, or the "
             "visibility of a feature hidden naturally by the new angle. Never report a MUTABLE VIEW constraint "
             "as failed. Judge whether intrinsic geometry and feature placement remain correct in 3D. "
+            "The overall score is an intrinsic IDENTITY score only: calculate it from geometry, component "
+            "count, base color/albedo, material, logo/markings, and text integrity. Product prominence and "
+            "channel fit are advisory creative scores and must not lower the identity score, set critical_drift, "
+            "or trigger retry_recommended by themselves. Judge intrinsic color beneath incident light: tolerate "
+            "physically plausible warm/cool casts, reflections, shadows, condensation, and water droplets when "
+            "the canonical base color and finish remain identifiable. A detachable part hidden by an authentic "
+            "assembled state is not missing; do not require threads, gaskets, ports, or mechanisms to be visible "
+            "in every shot. Failed constraint IDs may include only genuine immutable product changes, never "
+            "creative preferences or temporarily concealed features. "
             "Inspect geometry, color, material, surface, pattern, logo/label fidelity, hardware, component count, and distinctive "
             "construction. Set critical_drift=true when any named logo or marking is missing or altered, "
             "the primary color or material changes, a distinctive component is missing or added, or core "
@@ -788,7 +845,8 @@ def execute_variant(
         variant.market,
         variant.channel,
         variant.environment,
-        aesthetic,
+        variant.style or aesthetic,
+        variant.treatment,
     )
     threshold = int(os.getenv("IDENTITY_QA_THRESHOLD", "85"))
     max_attempts = max(1, int(os.getenv("IDENTITY_MAX_ATTEMPTS", "2")))
@@ -806,7 +864,8 @@ def execute_variant(
                 variant.market,
                 variant.channel,
                 variant.environment,
-                aesthetic,
+                variant.style or aesthetic,
+                variant.treatment,
                 repair_plan,
             )
         step_params: dict[str, Any] = {
@@ -1069,6 +1128,7 @@ async def create_run(
         parsed_channels,
         parsed_environments,
         int(os.getenv("MAX_VARIANTS_PER_RUN", "12")),
+        aesthetic,
     )
 
     RUNS[run_id] = {
@@ -1200,7 +1260,7 @@ def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$"))
         )
     output = io.StringIO()
     fields = [
-        "run_id", "product_name", "variant_id", "market", "channel", "environment",
+        "run_id", "product_name", "variant_id", "market", "channel", "environment", "treatment",
         "status", "score", "critical_drift", "qa_violations", "qa_notes",
         "qa_axes", "failed_constraint_ids", "approval_status", "approval_note",
         "sha256", "durable_url", "provider",
@@ -1215,6 +1275,7 @@ def export_run(run_id: str, format: str = Query("json", pattern="^(json|csv)$"))
             "market": variant.get("market"),
             "channel": variant.get("channel"),
             "environment": variant.get("environment"),
+            "treatment": variant.get("treatment"),
             "status": variant.get("status"),
             "score": variant.get("score"),
             "critical_drift": variant.get("critical_drift", False),
